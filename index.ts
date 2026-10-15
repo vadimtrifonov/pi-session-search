@@ -1,0 +1,159 @@
+import { createHash } from 'node:crypto';
+import { dirname, join, relative, resolve } from 'node:path';
+import { getAgentDir, type ExtensionAPI, type ExtensionContext } from '@earendil-works/pi-coding-agent';
+import { Type, type Static } from 'typebox';
+import { SessionService } from './src/service.mjs';
+
+const nullableString = Type.Union([Type.String(), Type.Null()]);
+const Sync = Type.Union([
+  Type.Object({ root: Type.String(), refreshed: Type.Literal(false) }),
+  Type.Object({
+    root: Type.String(), refreshed: Type.Literal(true),
+    files: Type.Integer(), changed: Type.Integer(), appended: Type.Integer(), removed: Type.Integer(),
+    pendingBytes: Type.Integer(), complete: Type.Boolean(), ms: Type.Number(),
+    errors: Type.Array(Type.Object({ path: Type.String(), error: Type.String() }))
+  })
+]);
+const Hit = Type.Object({
+  sessionId: Type.String(), entryId: Type.String(), part: Type.String(), offset: Type.Integer(),
+  sessionFile: Type.String(), cwd: Type.String(), name: nullableString,
+  kind: Type.String(), tool: nullableString, timestamp: Type.String(),
+  excerpt: Type.String(), excerptTruncated: Type.Boolean(), copies: Type.Integer()
+});
+const Section = Type.Object({ hits: Type.Array(Hit), more: Type.Boolean() });
+const SearchOutput = Type.Union([
+  Type.Object({ conversation: Section, tools: Section, next: Type.Optional(Type.String()), ms: Type.Number(), sync: Sync }),
+  Type.Object({
+    sessions: Type.Array(Type.Object({
+      sessionId: Type.String(), sessionFile: Type.String(), cwd: Type.String(), name: nullableString,
+      started: Type.String(), updated: Type.String()
+    })), more: Type.Boolean(), next: Type.Optional(Type.String()), ms: Type.Number(), sync: Sync
+  })
+]);
+const ReadOutput = Type.Object({
+  sessionId: Type.String(), branchEnd: Type.String(), text: Type.String(), next: Type.Optional(Type.String()), sync: Sync,
+  spans: Type.Optional(Type.Array(Type.Object({
+    entryId: Type.String(), part: Type.String(), kind: Type.String(), from: Type.Integer(), to: Type.Integer(),
+    preview: Type.Optional(Type.Boolean())
+  })))
+});
+
+const oneLine = (value: string, max = 600) => value.replace(/\s+/g, ' ').slice(0, max);
+function indexStatus(sync: Static<typeof Sync>) {
+  const scope = `Archive: ${oneLine(sync.root, 240)} · `;
+  if (!sync.refreshed) return scope + 'index not refreshed\n';
+  const refreshed = scope + `${sync.files} files\n`;
+  if (sync.complete) return refreshed;
+  return refreshed + `Index refresh incomplete: ${sync.errors.length} error(s), ${sync.pendingBytes} pending bytes. Cached results may be stale or incomplete.\n`
+    + sync.errors.slice(0, 3).map(e => `${oneLine(e.path, 200)}: ${oneLine(e.error, 200)}\n`).join('');
+}
+
+function boundedRows(heading: string, rows: string[], budget: number) {
+  let text = heading + '\n';
+  for (let i = 0; i < rows.length; i++) {
+    if (text.length + rows[i].length + 120 > budget) {
+      return text + `… ${rows.length - i} further hits in structuredContent; use a smaller limit for shorter pages.\n`;
+    }
+    text += rows[i] + '\n';
+  }
+  return text;
+}
+
+function searchText(result: Static<typeof SearchOutput>) {
+  let text = indexStatus(result.sync);
+  const continuation = result.next ? `\nContinue with the same query and filters: ${JSON.stringify({ cursor: result.next })}\n` : '';
+  const budget = 12000 - text.length - continuation.length;
+  if ('sessions' in result) {
+    return text + boundedRows(`Recent sessions (${result.sessions.length}${result.more ? '+' : ''})`, result.sessions.map(s =>
+      `${s.sessionId} · ${s.updated} · ${oneLine(s.cwd, 200)}${s.name ? ` · ${oneLine(s.name, 160)}` : ''}`), budget) + continuation;
+  }
+  for (const [name, section] of [['Conversation', result.conversation], ['Tool activity', result.tools]] as const) {
+    const heading = `${name} (${section.hits.length}${section.more ? '+' : ''})`;
+    text += boundedRows(heading, section.hits.map((h, i) => {
+      const ref = { sessionId: h.sessionId, entryId: h.entryId, part: h.part, offset: h.offset };
+      return `${i + 1}. ${h.kind}${h.tool ? `/${h.tool}` : ''} · ${h.timestamp} · ${oneLine(h.cwd, 180)}${h.copies > 1 ? ` · ${h.copies} session copies` : ''}\n`
+        + `   ${JSON.stringify(ref)}\n   ${oneLine(h.excerpt)}`;
+    }), Math.floor(budget / 2));
+  }
+  return text + continuation;
+}
+
+export default function (pi: ExtensionAPI) {
+  const services = new Map<string, SessionService>();
+  function service(ctx: ExtensionContext) {
+    const agentDir = resolve(getAgentDir());
+    const defaultRoot = join(agentDir, 'sessions');
+    const sessionDir = resolve(ctx.sessionManager.getSessionDir());
+    // Direct children of the standard sessions root share that archive; other directories are roots.
+    const root = relative(defaultRoot, dirname(sessionDir)) === '' ? defaultRoot : sessionDir;
+    let instance = services.get(root);
+    if (!instance) {
+      const key = createHash('sha256').update(root).digest('hex').slice(0, 16);
+      instance = new SessionService({ root, db: join(agentDir, 'cache', 'session-search', `${key}.db`) });
+      services.set(root, instance);
+    }
+    return instance;
+  }
+  pi.on('session_shutdown', async () => {
+    const closing = [...services.values()];
+    services.clear();
+    await Promise.all(closing.map(s => s.close()));
+  });
+
+  pi.registerTool({
+    name: 'session_search', label: 'Session Search',
+    description: 'Search recorded Pi sessions in separate conversation and tool-activity sections. All terms must match one text part. Omit query to browse recent sessions. Fresh searches refresh the index; continuation uses the cached index and fails if it changed. The current session is excluded unless sessionId is specified. Copy counts are repeated occurrences, not independent corroboration. For partial identifiers or exact punctuation, search raw JSONL files under the reported archive root instead.',
+    promptSnippet: 'Find prior investigations and decisions in recorded Pi sessions.',
+    promptGuidelines: ['When an answer depends on prior sessions or findings missing from current context, use session_search, then session_read on relevant source hits.'],
+    parameters: Type.Object({
+      query: Type.Optional(Type.String({ description: 'Whole tokens, not substrings. Quoted phrases require adjacent tokens, not exact punctuation; operators such as OR are words. Omit to list recent sessions.' })),
+      cursor: Type.Optional(Type.String({ description: 'next from a previous search or listing. Repeat its query and filters; limit may change. A stale cursor requires a fresh search without cursor.' })),
+      cwd: Type.Optional(Type.String({ description: 'Exact recorded working directory. Omit to search the archive.' })),
+      descendants: Type.Optional(Type.Boolean({ description: 'Include subdirectories of cwd.' })),
+      sessionId: Type.Optional(Type.String({ description: 'Restrict to this full session ID, including the current session if specified.' })),
+      since: Type.Optional(Type.String({ description: 'Inclusive ISO date/time: evidence timestamp, or last activity when browsing.' })),
+      until: Type.Optional(Type.String({ description: 'Exclusive ISO date/time: evidence timestamp, or last activity when browsing.' })),
+      reasoning: Type.Optional(Type.Boolean({ description: 'Include recorded reasoning text (default false); enabling it requires a nonblank query.' })),
+      tool: Type.Optional(Type.String({ description: 'Restrict keyword search to this exact tool name; requires a nonblank query.' })),
+      limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50, description: 'Hits per section, or sessions when browsing; default 5. Text previews are bounded; structuredContent contains all requested hits.' }))
+    }),
+    outputSchema: SearchOutput,
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    executionMode: 'parallel',
+    async execute(_id, params, signal, _update, ctx) {
+      if (params.descendants && !params.cwd) throw new Error('descendants requires cwd');
+      const { sessionId, ...options } = params;
+      const result = await service(ctx).search({
+        ...options, session: sessionId, excludeSession: sessionId ? undefined : ctx.sessionManager.getSessionId()
+      }, signal) as Static<typeof SearchOutput>;
+      return { content: [{ type: 'text', text: searchText(result) }], structuredContent: result, details: undefined };
+    }
+  });
+
+  pi.registerTool({
+    name: 'session_read', label: 'Session Read',
+    description: 'Read a source hit using its sessionId, entryId, part and offset. Omit entryId for a prompt/summary outline. Continue with the same sessionId and the returned next cursor. Reads current source via a cached path without refreshing the index; unknown sessions require a fresh session_search. Follows one recorded branch, not reconstructed model context; nearby tool context is clipped and an unseen later response may appear as a labelled non-contiguous preview.',
+    promptSnippet: 'Read source-anchored passages or outlines from recorded Pi sessions.',
+    parameters: Type.Object({
+      sessionId: Type.String({ description: 'Full session ID already indexed by session_search.' }),
+      entryId: Type.Optional(Type.String({ description: 'Entry to open. Omit for an outline.' })),
+      part: Type.Optional(Type.String({ description: 'Exact source-part pointer from the search hit.' })),
+      offset: Type.Optional(Type.Integer({ minimum: 0, description: 'UTF-16 code-unit offset from the search hit; default 0.' })),
+      branchEnd: Type.Optional(Type.String({ description: 'Recorded entry ending the selected ancestry; defaults to the newest descendant of the anchor, or newest recorded branch.' })),
+      cursor: Type.Optional(Type.String({ description: 'next cursor from a previous read; fixes the branch and continuation position.' })),
+      maxChars: Type.Optional(Type.Integer({ minimum: 2000, maximum: 12000, description: 'Passage character budget; default 12000.' }))
+    }),
+    outputSchema: ReadOutput,
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    executionMode: 'parallel',
+    async execute(_id, params, signal, _update, ctx) {
+      if (!params.entryId && !params.cursor && (params.part !== undefined || params.offset !== undefined)) {
+        throw new Error('part and offset require entryId or a continuation cursor');
+      }
+      const result = await service(ctx).read(params, signal) as Static<typeof ReadOutput>;
+      const text = indexStatus(result.sync) + `session ${result.sessionId} · branch end ${result.branchEnd}\n`
+        + result.text + (result.next ? `\nContinue: ${JSON.stringify({ sessionId: result.sessionId, cursor: result.next })}` : '');
+      return { content: [{ type: 'text', text }], structuredContent: result, details: undefined };
+    }
+  });
+}
