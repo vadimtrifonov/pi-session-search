@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Worker } from 'node:worker_threads';
 import { once } from 'node:events';
+import { createHash } from 'node:crypto';
 import { HistoryIndex, ftsQuery } from '../src/search.mjs';
 import { sourceParts, searchParts } from '../src/content.mjs';
 
@@ -74,9 +75,12 @@ test('fork copies collapse without hiding divergent work or changing source scop
 
 test('sync handles appends, rewrites, renames and incomplete or failed files transactionally', async t=>{
   const {root,index}=setup(t);let path=join(root,'a.jsonl');
+  index.db.exec('PRAGMA cache_size=-4096');
   const first=[header('a'),message('a1',null,'before')];
   writeFileSync(path,jsonl(first));await index.sync(root);
+  assert.equal(index.db.prepare('PRAGMA cache_size').get().cache_size, -4096);
   assert.equal((await index.sync(root)).changed,0);
+  assert.equal(index.db.prepare('PRAGMA cache_size').get().cache_size, -4096);
   const second=message('a2','a1','appended');const third=JSON.stringify(message('a3','a2','trailing'));
   appendFileSync(path,jsonl([second])+third.slice(0,30));
   let sync=await index.sync(root);assert.equal(sync.appended,1);assert.equal(sync.complete,false);assert.ok(sync.pendingBytes>0);
@@ -94,9 +98,46 @@ test('sync handles appends, rewrites, renames and incomplete or failed files tra
   assert.equal(index.search({query:'afterx'}).conversation.hits[0].sessionFile,renamed);
   appendFileSync(path,'{bad}\n');
   sync=await index.sync(root);assert.equal(sync.errors.length,1);assert.equal(sync.complete,false);
+  assert.equal(index.db.prepare('PRAGMA cache_size').get().cache_size, -4096);
   assert.equal(index.search({query:'afterx'}).conversation.hits.length,1);
   rmSync(path);sync=await index.sync(root);assert.equal(sync.removed,1);
   assert.equal(index.db.prepare('SELECT count(*) n FROM doc').get().n,0);
+});
+
+test('append guards hash the raw last complete line, including across partial appends', async t => {
+  const { root, index } = setup(t), path = join(root, 'a.jsonl');
+  const image = id => ({ ...message(id, null, ''), message: { role: 'user', content: [
+    { type: 'text', text: `image ${id} 🧪` }, { type: 'image', data: 'A'.repeat(2 << 20) }
+  ] } });
+  const prefix = jsonl([header('a'), image('first')]);
+  const second = jsonl([image('second')]);
+  const marker = jsonl([message('marker', 'second', 'small')]);
+  const last = second + marker, next = jsonl([image('third')]);
+  const split = (1 << 20) + 20;
+  writeFileSync(path, prefix + last + next.slice(0, split));
+  let sync = await index.sync(root);
+  assert.equal(sync.complete, false);
+  const digest = text => createHash('sha256').update(text).digest('hex');
+  const state = () => index.db.prepare('SELECT indexed_bytes,tail_start,tail_hash FROM session WHERE id=?').get('a');
+  const expected = { indexed_bytes: Buffer.byteLength(prefix + last), tail_start: Buffer.byteLength(prefix + second), tail_hash: digest(marker) };
+  assert.deepEqual({ ...state() }, expected);
+  appendFileSync(path, next.slice(split, split + 20));
+  sync = await index.sync(root);
+  assert.equal(sync.appended, 1);
+  assert.deepEqual({ ...state() }, expected); // No new complete record: preserve the existing guard.
+  const blank = ' \r\n';
+  appendFileSync(path, next.slice(split + 20) + blank);
+  sync = await index.sync(root);
+  assert.equal(sync.appended, 1);
+  assert.equal(sync.complete, true);
+  assert.equal(state().tail_start, Buffer.byteLength(prefix + last + next));
+  assert.equal(state().tail_hash, digest(blank)); // Blank complete lines also guard appends.
+  writeFileSync(path, prefix + last + next + '\t\r\n' + jsonl([message('fourth', 'third', 'added')]));
+  sync = await index.sync(root);
+  assert.equal(sync.appended, 0); // Growth with a changed indexed tail requires replacement.
+  assert.equal(sync.complete, true);
+  assert.equal(index.search({ query: 'image' }).conversation.hits.length, 3);
+  assert.equal(index.search({ query: 'added' }).conversation.hits.length, 1);
 });
 
 test('replacement and removal retire text atomically without losing fork copies', async t=>{

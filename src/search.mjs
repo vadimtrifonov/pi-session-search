@@ -130,17 +130,22 @@ export class HistoryIndex {
         this.db.exec('COMMIT');
       } catch (e) { this.db.exec('ROLLBACK'); throw e; }
     }
-    for (const file of files) {
-      const previous = this.sql.state.get(file.path);
-      if (previous && previous.size === file.stat.size && previous.mtime === file.stat.mtimeMs) continue;
-      try {
-        const result = await this.indexFile(file.path);
-        if (result) {
-          changed++;
-          if (result === 'append') appended++;
-        }
-      } catch (e) { errors.push({path: file.path, error: e.message}); }
-    }
+    // Use a larger cache for index writes, then restore the query cache.
+    const cacheSize = this.db.prepare('PRAGMA cache_size').get().cache_size;
+    try {
+      this.db.exec('PRAGMA cache_size=-32768');
+      for (const file of files) {
+        const previous = this.sql.state.get(file.path);
+        if (previous && previous.size === file.stat.size && previous.mtime === file.stat.mtimeMs) continue;
+        try {
+          const result = await this.indexFile(file.path);
+          if (result) {
+            changed++;
+            if (result === 'append') appended++;
+          }
+        } catch (e) { errors.push({path: file.path, error: e.message}); }
+      }
+    } finally { this.db.exec(`PRAGMA cache_size=${cacheSize}`); }
     const pending = this.db.prepare('SELECT coalesce(sum(size-indexed_bytes),0) bytes FROM session').get().bytes;
     return {files: files.length, changed, appended, removed, pendingBytes: pending, complete: errors.length === 0 && pending === 0, errors, ms: +(performance.now() - start).toFixed(1)};
   }
@@ -170,7 +175,11 @@ export class HistoryIndex {
       let indexedBytes = append ? previous.indexed_bytes : 0;
       let tailStart = append ? previous.tail_start : 0;
       let tailHash = append ? previous.tail_hash : '';
+      let tailLine;
       for await (const {line, offset} of readLines(handle, indexedBytes, snapshot.size)) {
+        // readLines does not reuse yielded buffers. Keep the bytes actually indexed,
+        // releasing the preceding line before parsing this one; do not re-read the file.
+        tailLine = line;
         const text = line.toString('utf8').trim();
         if (text) {
           const e = JSON.parse(text);
@@ -197,9 +206,9 @@ export class HistoryIndex {
         }
         indexedBytes = offset + line.length;
         tailStart = offset;
-        tailHash = hash(line);
       }
       if (!session) throw new Error('Session header is incomplete');
+      if (tailLine) tailHash = hash(tailLine);
       const after = await handle.stat();
       if (after.size < snapshot.size || (after.size === snapshot.size && after.mtimeMs !== snapshot.mtimeMs)) throw new Error('Source changed while indexing; retry');
       this.sql.finish.run(name, updated, snapshot.size, snapshot.mtimeMs, indexedBytes, tailStart, tailHash, session);
@@ -254,20 +263,27 @@ export class HistoryIndex {
       return {sessions: rows.slice(0, limit), more: rows.length > limit, ms: +(performance.now() - start).toFixed(1)};
     }
     const results = {};
+    const scopedLiteral = literal && !!options.session;
     for (const table of ['conversation', 'tool_io']) {
       const filters = [...dateSql];
       if (!options.reasoning) filters.push("d.kind<>'reasoning'");
       if (tool !== null) filters.push('d.tool=?');
       if (kind !== undefined) filters.push('d.kind=?');
       const args = [query, ...dateArgs, ...(tool !== null ? [tool] : []), ...(kind === undefined ? [] : [kind]), ...scope.args];
+      // A single session gives a bounded document set; scan text only for those documents.
+      // Otherwise literal scans start from text, avoiding archive-wide random rowid lookups.
+      const from = scopedLiteral ? `doc d CROSS JOIN ${table} f ON f.rowid=d.id`
+        : `${table} f ${literal ? 'CROSS JOIN' : 'JOIN'} doc d ON d.id=f.rowid`;
+      const inScope = scopedLiteral
+        ? `d.id IN (SELECT o.doc FROM occurrence o JOIN session s ON s.id=o.session WHERE ${scope.sql})`
+        : `EXISTS(SELECT 1 FROM occurrence o JOIN session s ON s.id=o.session WHERE o.doc=d.id AND ${scope.sql})`;
       const rows = this.db.prepare(`
         SELECT d.id,d.kind,d.tool,d.timestamp
-        FROM ${table} f ${literal ? 'CROSS JOIN' : 'JOIN'} doc d ON d.id=f.rowid
+        FROM ${from}
         WHERE ${literal ? 'instr(f.text,?)>0' : `f.${table} MATCH ?`} ${filters.length ? 'AND ' + filters.join(' AND ') : ''}
-          AND EXISTS(SELECT 1 FROM occurrence o JOIN session s ON s.id=o.session WHERE o.doc=d.id AND ${scope.sql})
+          AND ${inScope}
         ORDER BY ${literal ? '' : 'f.rank,'}d.key LIMIT ?
       `).all(...args, limit + 1);
-      // Literal scans start from the text table: doc-key order would cause random text lookups.
       // Load complete text/snippets only for the displayed page.
       const preview = this.db.prepare(literal ? `SELECT text source FROM ${table} WHERE rowid=?` : `SELECT text source,
         snippet(${table},0,'[',']','…',32) excerpt, snippet(${table},0,'','',char(1),32) plain

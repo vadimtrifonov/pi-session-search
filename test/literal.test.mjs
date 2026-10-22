@@ -59,6 +59,24 @@ test('literal search preserves exact text, short strings, original offsets and w
   assert.equal(index.search({ ...options, reasoning: true }).conversation.hits.length, 3);
   assert.equal(index.search({ ...options, tool: 'inspect' }).tools.hits.length, 1);
   assert.deepEqual(index.search({ ...options, tool: 'inspect' }).conversation.hits, []);
+  // Each cwd owns exactly one session here, so the text-scan plan is an independent
+  // oracle for the session-first plan, including complete hits, copy counts and paging.
+  const stable = ({ ms, ...result }) => result;
+  for (const [session, cwd] of [['origin', 'c:/project'], ['fork', 'c:/project/child']]) {
+    for (const filter of [{}, { limit: 1 }, { reasoning: true }, { kind: 'assistant' },
+      { kind: 'tool_call', tool: 'inspect' }, { tool: 'missing' },
+      { since: timestamp, until: '2026-01-02' }, { since: '2026-01-02' }, { until: timestamp },
+      { excludeSession: session }]) {
+      assert.deepEqual(stable(index.search({ ...options, ...filter, session })),
+        stable(index.search({ ...options, ...filter, cwd })));
+    }
+  }
+  assert.deepEqual(stable(index.search({ ...options, session: 'fork', cwd: 'C:\\Project', descendants: true })),
+    stable(index.search({ ...options, session: 'fork' })));
+  for (const scope of [{ session: 'missing' }, { session: 'fork', cwd: 'c:/project' }]) {
+    assert.deepEqual(stable(index.search({ ...options, ...scope })),
+      { conversation: { hits: [], more: false }, tools: { hits: [], more: false } });
+  }
   const first = index.search({ ...options, limit: 1 });
   assert.equal(first.conversation.hits.length, 1);
   assert.equal(first.conversation.more, true);
