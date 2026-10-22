@@ -3,7 +3,9 @@
 Local keyword search of Pi session history, with source references and bounded, branch-aware reads.
 Conversation and tool activity have separate result sections, so large tool outputs do not displace every conversational match.
 
-Requires Node.js 22.19 or newer and Pi's extension APIs; tested with Pi 1.3.0 on Node.js 26.12.0.
+Requires Node.js 24.16+ (24.x) or 26.1+ and Pi's extension APIs.
+These versions include the [SQLite text-decoding fix](https://github.com/nodejs/node/pull/61954) needed to preserve embedded NUL characters in tool output.
+Tested with Pi 1.3.0 on Node.js 24.16.0, 26.1.0, and 26.12.0.
 Only session-format v3 JSONL files are supported.
 
 ## Install
@@ -134,4 +136,11 @@ npm test
 ```
 
 The core and worker tests need no external dependencies.
-The Pi loader test runs when Pi and TypeBox peers are resolvable; otherwise it is explicitly skipped.
+Run the Pi loader integration check separately:
+
+```sh
+npm run test:integration
+```
+
+This check requires the declared Pi and TypeBox peers to be locally resolvable and fails if they are missing.
+Node's test runner does not use Pi's host-module mapping.

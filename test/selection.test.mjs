@@ -33,7 +33,8 @@ test('kind selects provenance before ranking and composes with scope', async t =
     const hits = [...result.conversation.hits, ...result.tools.hits];
     assert.ok(hits.length > 0);
     assert.ok(hits.every(h => h.kind === kind));
-    assert.equal(index.search({ query: 'OpenSpec', kind, since: '2026-01-02' }).conversation.hits.length, 0);
+    const later = index.search({ query: 'OpenSpec', kind, since: '2026-01-02' });
+    assert.deepEqual([...later.conversation.hits, ...later.tools.hits], []);
   }
   const users = index.search({ query: 'OpenSpec', kind: 'user' }).conversation.hits;
   assert.equal(users.find(h => h.entryId === 'request').copies, 2);

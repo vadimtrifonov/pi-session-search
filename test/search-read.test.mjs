@@ -28,6 +28,7 @@ test('search opens deep tool-argument evidence directly, with references stable 
     references.push({sessionId,entryId,part,offset});
     assert.ok(offset>60000);
     assert.match(hit.excerpt,/deepIdentifier/);
+    assert.equal(hit.excerptTruncated,true);
     const read=await readSession(hit.sessionFile,{entryId,part,offset,maxChars:2000});
     assert.match(read.text,/deepIdentifier exact evidence/);
     assert.ok(read.text.length<=2000);
@@ -56,6 +57,8 @@ test('each preview and offset belongs to the hit source in both sections', async
     seen.push(hit.entryId);
     assert.equal(hit.offset,bodies[hit.entryId].indexOf('needle'));
     assert.ok(hit.excerpt.includes(`[needle] ${hit.entryId}`));
+    assert.ok(hit.excerpt.length<600); // Native token-budget clipping is still truncation.
+    assert.equal(hit.excerptTruncated,bodies[hit.entryId].length>600);
     const read=await readSession(hit.sessionFile,{entryId:hit.entryId,part:hit.part,offset:hit.offset,maxChars:2000});
     assert.ok(read.text.includes(`needle ${hit.entryId}`));
     assert.ok(read.spans.some(s=>!s.preview&&s.entryId===hit.entryId&&s.part===hit.part&&s.from<=hit.offset&&s.to>hit.offset));

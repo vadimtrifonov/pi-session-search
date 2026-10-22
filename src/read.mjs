@@ -155,7 +155,7 @@ export async function readSession(file, { entryId, part, offset = 0, branchEnd, 
   branchEnd ??= entryId ? newestUnder(s, entryId) : s.entries.at(-1)?.id ?? fail('session has no entries');
   const path = ancestry(s, branchEnd);
   if (entryId && !path.some(e => e.id === entryId)) fail(`entry ${entryId} is not on the branch ending at ${branchEnd}`);
-  let units = path.flatMap(unitsOf);
+  let units = (view === 'entry' ? [need(s, entryId)] : path).flatMap(unitsOf);
   const cursorAt = (u, from = 0, text = '') => encodeCursor({ view, session, branchEnd, entryId: u.id, part: u.part, offset: from, hash: text ? digest(text) : undefined });
   let page;
   if (view === 'outline') {
@@ -164,7 +164,6 @@ export async function readSession(file, { entryId, part, offset = 0, branchEnd, 
     page = turnInventory(path, units, { anchor: anchor ?? entryId, entryId, part, hash, resumed: !!cursor }, maxChars,
       (u, anchor, hash) => encodeCursor({ view, session, branchEnd, entryId: u.id, part: u.part, offset: 0, anchor, hash }));
   } else {
-    if (view === 'entry') units = units.filter(u => u.id === entryId);
     if (view === 'conversation') {
       const selected = units.filter(u => u.id === entryId && (part === undefined ? u.kind !== 'reasoning' : u.part === part));
       if (selected.length && !selected.some(u => FULL.has(u.kind))) {

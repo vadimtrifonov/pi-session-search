@@ -114,17 +114,7 @@ export class HistoryIndex {
     const {files, errors} = discover(root);
     const walkComplete = errors.length === 0;
     let changed = 0, appended = 0, removed = 0;
-    for (const file of files) {
-      const previous = this.sql.state.get(file.path);
-      if (previous && previous.size === file.stat.size && previous.mtime === file.stat.mtimeMs) continue;
-      try {
-        const result = await this.indexFile(file.path);
-        if (result) {
-          changed++;
-          if (result === 'append') appended++;
-        }
-      } catch (e) { errors.push({path: file.path, error: e.message}); }
-    }
+    // Retire missing paths first so a renamed file can reclaim its session ID in this refresh.
     if (walkComplete) {
       const seen = new Set(files.map(f => f.path));
       this.db.exec('BEGIN IMMEDIATE');
@@ -139,6 +129,17 @@ export class HistoryIndex {
         }
         this.db.exec('COMMIT');
       } catch (e) { this.db.exec('ROLLBACK'); throw e; }
+    }
+    for (const file of files) {
+      const previous = this.sql.state.get(file.path);
+      if (previous && previous.size === file.stat.size && previous.mtime === file.stat.mtimeMs) continue;
+      try {
+        const result = await this.indexFile(file.path);
+        if (result) {
+          changed++;
+          if (result === 'append') appended++;
+        }
+      } catch (e) { errors.push({path: file.path, error: e.message}); }
     }
     const pending = this.db.prepare('SELECT coalesce(sum(size-indexed_bytes),0) bytes FROM session').get().bytes;
     return {files: files.length, changed, appended, removed, pendingBytes: pending, complete: errors.length === 0 && pending === 0, errors, ms: +(performance.now() - start).toFixed(1)};
@@ -315,8 +316,8 @@ function matchPreview(source, plain, marked) {
   let first = 0;
   while (first < text.length && marked[first + prefix] === text[first]) first++;
   let excerpt = marked;
-  const excerptTruncated = marked.length > 600;
-  if (excerptTruncated) {
+  const excerptTruncated = text.length < source.length || marked.length > 600;
+  if (marked.length > 600) {
     const from = Math.max(0, first + prefix - 200), to = Math.min(marked.length, from + 598);
     excerpt = (from ? '…' : '') + marked.slice(from, to) + (to < marked.length ? '…' : '');
   }

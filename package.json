@@ -6,12 +6,13 @@
   "type": "module",
   "keywords": ["pi-package"],
   "pi": { "extensions": ["./index.ts"] },
-  "engines": { "node": ">=22.19.0" },
+  "engines": { "node": "^24.16.0 || >=26.1.0" },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
     "typebox": "*"
   },
   "scripts": {
-    "test": "node --test"
+    "test": "node --test \"test/*.test.mjs\"",
+    "test:integration": "node --test test/adapter.integration.mjs"
   }
 }

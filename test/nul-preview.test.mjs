@@ -4,7 +4,6 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { HistoryIndex } from '../src/search.mjs';
-import { nulMatchOffset } from '../src/nul-preview.mjs';
 import { readSession } from '../src/read.mjs';
 
 const timestamp = '2026-01-01T00:00:00.000Z';
@@ -52,7 +51,4 @@ test('word previews retain native match offsets and original text across NUL sep
   assert.equal(index.db.prepare('SELECT text FROM tool_io').get().text, actual);
   assert.equal(index.db.prepare('SELECT total_changes() n').get().n, changes);
   assert.deepEqual(index.db.prepare('SELECT name,sql FROM sqlite_schema ORDER BY name').all(), schema);
-  const prefix = '🧪 before\0hidden compilations after';
-  assert.equal(nulMatchOffset(prefix, '"compil"*'), prefix.indexOf('compilations'));
-  assert.throws(() => nulMatchOffset('prefix\0only', '"missing"'), /does not preserve/);
 });

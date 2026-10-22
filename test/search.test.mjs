@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, appendFileSync, rmSync, utimesSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, appendFileSync, renameSync, rmSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Worker } from 'node:worker_threads';
@@ -72,8 +72,8 @@ test('fork copies collapse without hiding divergent work or changing source scop
   assert.deepEqual(index.search({since:'2026-01-05'}).sessions.map(s=>s.sessionId),['fork']);
 });
 
-test('sync handles appends, incomplete tails, same-size rewrites and failed files transactionally', async t=>{
-  const {root,index}=setup(t);const path=join(root,'a.jsonl');
+test('sync handles appends, rewrites, renames and incomplete or failed files transactionally', async t=>{
+  const {root,index}=setup(t);let path=join(root,'a.jsonl');
   const first=[header('a'),message('a1',null,'before')];
   writeFileSync(path,jsonl(first));await index.sync(root);
   assert.equal((await index.sync(root)).changed,0);
@@ -89,6 +89,9 @@ test('sync handles appends, incomplete tails, same-size rewrites and failed file
   sync=await index.sync(root);assert.equal(sync.changed,1);assert.equal(sync.appended,0);
   assert.equal(index.search({query:'before'}).conversation.hits.length,0);
   assert.equal(index.search({query:'afterx'}).conversation.hits.length,1);
+  const renamed=join(root,'renamed.jsonl');renameSync(path,renamed);path=renamed;
+  sync=await index.sync(root);assert.equal(sync.complete,true);assert.equal(sync.removed,1);
+  assert.equal(index.search({query:'afterx'}).conversation.hits[0].sessionFile,renamed);
   appendFileSync(path,'{bad}\n');
   sync=await index.sync(root);assert.equal(sync.errors.length,1);assert.equal(sync.complete,false);
   assert.equal(index.search({query:'afterx'}).conversation.hits.length,1);
