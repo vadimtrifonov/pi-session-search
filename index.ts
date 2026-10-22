@@ -22,12 +22,12 @@ const Hit = Type.Object({
 });
 const Section = Type.Object({ hits: Type.Array(Hit), more: Type.Boolean() });
 const SearchOutput = Type.Union([
-  Type.Object({ conversation: Section, tools: Section, next: Type.Optional(Type.String()), ms: Type.Number(), sync: Sync }),
+  Type.Object({ conversation: Section, tools: Section, ms: Type.Number(), sync: Sync }),
   Type.Object({
     sessions: Type.Array(Type.Object({
       sessionId: Type.String(), sessionFile: Type.String(), cwd: Type.String(), name: nullableString,
       started: Type.String(), updated: Type.String()
-    })), more: Type.Boolean(), next: Type.Optional(Type.String()), ms: Type.Number(), sync: Sync
+    })), more: Type.Boolean(), ms: Type.Number(), sync: Sync
   })
 ]);
 const ReadOutput = Type.Object({
@@ -59,10 +59,9 @@ function rowsText(heading: string, rows: string[]) {
 
 function searchText(result: Static<typeof SearchOutput>) {
   let text = indexStatus(result.sync);
-  const continuation = result.next ? `\nContinue with the same query and filters: ${JSON.stringify({ cursor: result.next })}\n` : '';
   if ('sessions' in result) {
     return text + rowsText(`Recent sessions (${result.sessions.length}${result.more ? '+' : ''})`, result.sessions.map(s =>
-      `${s.sessionId} · ${s.updated} · ${oneLine(s.cwd, 200)}${s.name ? ` · ${oneLine(s.name, 160)}` : ''}`)) + continuation;
+      `${s.sessionId} · ${s.updated} · ${oneLine(s.cwd, 200)}${s.name ? ` · ${oneLine(s.name, 160)}` : ''}`));
   }
   for (const [name, section] of [['Conversation', result.conversation], ['Tool activity', result.tools]] as const) {
     const heading = `${name} (${section.hits.length}${section.more ? '+' : ''})`;
@@ -72,7 +71,7 @@ function searchText(result: Static<typeof SearchOutput>) {
         + `   ${JSON.stringify(ref)}\n   ${oneLine(h.excerpt)}`;
     }));
   }
-  return text + continuation;
+  return text;
 }
 
 export default function (pi: ExtensionAPI) {
@@ -99,14 +98,13 @@ export default function (pi: ExtensionAPI) {
 
   pi.registerTool({
     name: 'session_search', label: 'Session Search',
-    description: 'Search recorded Pi sessions in separate conversation and tool-activity sections. Word queries require all terms in one text part; anyOf supplies alternative AND queries, combined with query using AND. mode:literal finds exact case-sensitive substrings, including punctuation and partial identifiers, in stable content-key order rather than relevance rank. kind selects source provenance. Omit query and anyOf to browse recent sessions. Fresh searches refresh the index; continuation uses the cached index and fails if it changed. The current session is excluded unless sessionId is specified. Copy counts are repeated occurrences, not independent corroboration.',
+    description: 'Search recorded Pi sessions in separate conversation and tool-activity sections. Word queries require all terms in one text part; anyOf supplies alternative AND queries, combined with query using AND. mode:literal finds exact case-sensitive substrings, including punctuation and partial identifiers, in stable content-key order rather than relevance rank. kind selects source provenance. Omit query and anyOf to browse recent sessions. Each search refreshes the index. The current session is excluded unless sessionId is specified. Copy counts are repeated occurrences, not independent corroboration.',
     promptSnippet: 'Find prior investigations and decisions in recorded Pi sessions.',
     promptGuidelines: ['When an answer depends on prior sessions or findings missing from current context, use session_search, then session_read on relevant source hits.'],
     parameters: Type.Object({
       query: Type.Optional(Type.String({ description: 'Words mode: all tokens and quoted token phrases must match; operators such as OR are words. Combined with anyOf using AND. Literal mode: exact case-sensitive substring, preserving punctuation, quotes and whitespace. Omit query and anyOf to browse.' })),
       anyOf: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { minItems: 1, maxItems: 12, description: 'Words mode only. Alternative queries, each with AND terms/quoted phrases, OR together. If query is present, it must also match the same part. Example: query:"headset", anyOf:["shutdown", "display interruption"].' })),
       mode: Type.Optional(Type.Union([Type.Literal('words'), Type.Literal('literal')], { description: 'words (default): token matching and BM25 rank. literal: case-sensitive substring scan, including short literals, in content-key order. Literal requires a nonblank query and rejects anyOf.' })),
-      cursor: Type.Optional(Type.String({ description: 'next from a previous search or listing. Repeat its query and filters; limit may change. A stale cursor requires a fresh search without cursor.' })),
       cwd: Type.Optional(Type.String({ description: 'Exact recorded working directory. Omit to search the archive.' })),
       descendants: Type.Optional(Type.Boolean({ description: 'Include subdirectories of cwd.' })),
       sessionId: Type.Optional(Type.String({ description: 'Restrict to this full session ID, including the current session if specified.' })),
@@ -115,7 +113,7 @@ export default function (pi: ExtensionAPI) {
       reasoning: Type.Optional(Type.Boolean({ description: 'Include recorded reasoning text (default false); enabling it requires query or anyOf.' })),
       tool: Type.Optional(Type.String({ description: 'Restrict search to this exact tool name; requires query or anyOf.' })),
       kind: Type.Optional(Type.Union(['user', 'assistant', 'summary', 'custom', 'tool_call', 'tool_result', 'shell'].map(v => Type.Literal(v)), { description: 'Restrict to one source kind. user: requests/decisions; assistant: written claims, not tool calls or reasoning; summary: Pi summaries; tool_result: recorded output. Requires query or anyOf. A kind is provenance, not a guarantee of truth.' })),
-      limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50, description: 'Hits per section, or sessions when browsing; default 5. All returned hits/sessions are shown in text; hit previews are at most 600 characters. Reduce limit for shorter responses.' }))
+      limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50, description: 'Hits per section, or sessions when browsing; default 5. All returned hits/sessions are shown in text; hit previews are at most 600 characters. A + after a count means further results were omitted: raise limit (max 50) or narrow the query, filters or dates. Reduce limit for shorter responses.' }))
     }),
     outputSchema: SearchOutput,
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },

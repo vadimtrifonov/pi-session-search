@@ -56,12 +56,11 @@ test('alternative clauses preserve same-part matching, evidence references and o
   const read = await readSession(join(root, 'origin.jsonl'), { entryId: deep.entryId, part: deep.part, offset: deep.offset, maxChars: 2000 });
   assert.match(read.text, /headset optical blackout/);
   const first = index.search({ ...options, limit: 1 });
-  assert.ok(first.next);
-  assert.throws(() => index.search({ ...options, anyOf: ['shutdown'], cursor: first.next }), /query or filters changed/);
-  assert.throws(() => index.search({ query: 'headset', cursor: first.next }), /query or filters changed/);
-  const next = index.search({ ...options, cursor: first.next, limit: 5 });
-  assert.equal(new Set([...first.conversation.hits, ...next.conversation.hits].map(h => h.entryId)).size, 3);
-  assert.equal(next.next, undefined);
+  assert.equal(first.conversation.hits.length, 1);
+  assert.equal(first.conversation.more, true);
+  const all = index.search({ ...options, limit: 3 });
+  assert.equal(new Set(all.conversation.hits.map(h => h.entryId)).size, 3);
+  assert.equal(all.conversation.more, false);
   for (const query of [undefined, 'headset']) {
     assert.throws(() => index.search({ query, anyOf: ['shutdown'], mode: 'literal' }), /only in words mode/);
   }

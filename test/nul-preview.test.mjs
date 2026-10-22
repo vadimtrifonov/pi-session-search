@@ -33,7 +33,7 @@ test('word previews retain native match offsets and original text across NUL sep
       : { role: 'assistant', content: [{ type: 'text', text: c.text }] } }
   ].map(JSON.stringify).join('\n') + '\n');
   await index.sync(root);
-  const revision = index.sql.revision.get().value;
+  const changes = index.db.prepare('SELECT total_changes() n').get().n;
   const schema = index.db.prepare('SELECT name,sql FROM sqlite_schema ORDER BY name').all();
   for (const c of cases) {
     const found = index.search({ query: c.query, session: c.id });
@@ -50,7 +50,7 @@ test('word previews retain native match offsets and original text across NUL sep
   assert.equal(literal.offset, actual.indexOf('\0unknown\0'));
   assert.ok(literal.excerpt.includes('\0MIT\0unknown\0'));
   assert.equal(index.db.prepare('SELECT text FROM tool_io').get().text, actual);
-  assert.equal(index.sql.revision.get().value, revision);
+  assert.equal(index.db.prepare('SELECT total_changes() n').get().n, changes);
   assert.deepEqual(index.db.prepare('SELECT name,sql FROM sqlite_schema ORDER BY name').all(), schema);
   const prefix = '🧪 before\0hidden compilations after';
   assert.equal(nulMatchOffset(prefix, '"compil"*'), prefix.indexOf('compilations'));

@@ -9,7 +9,7 @@ let hasPeers = true;
 try { import.meta.resolve('@earendil-works/pi-coding-agent'); import.meta.resolve('typebox/value'); }
 catch (error) { if (error.code === 'ERR_MODULE_NOT_FOUND') hasPeers = false; else throw error; }
 
-test('Pi loader: paginated results, archive paths, self-exclusion and no-UI lifecycle', {
+test('Pi loader: truncated results, archive paths, self-exclusion and no-UI lifecycle', {
   skip: hasPeers ? false : 'Pi peer dependencies are not installed in this checkout', timeout: 20000
 }, async t => {
   const { discoverAndLoadExtensions } = await import('@earendil-works/pi-coding-agent');
@@ -76,8 +76,10 @@ test('Pi loader: paginated results, archive paths, self-exclusion and no-UI life
     const previews = [...text.matchAll(/^   \{"sessionId":.*\}\n   ([^\n]*)/gm)];
     assert.equal(previews.length, expected.length);
     assert.ok(previews.every(m => m[1].length <= 600));
-    assert.doesNotMatch(text, /further hits in structuredContent/);
-    if (result.structuredContent.next) assert.ok(text.includes(result.structuredContent.next));
+    for (const [name, key] of [['Conversation', 'conversation'], ['Tool activity', 'tools']]) {
+      const section = result.structuredContent[key];
+      assert.ok(text.includes(`${name} (${section.hits.length}${section.more ? '+' : ''})\n`));
+    }
   }
   const found = await call('session_search', { query: 'archive needle', limit: 50 });
   assert.equal(found.structuredContent.sync.root, join(agentDir, 'sessions'));
@@ -91,7 +93,7 @@ test('Pi loader: paginated results, archive paths, self-exclusion and no-UI life
   assert.ok(found.content[0].text.length > 12000);
   assert.match(found.content[0].text, /Tool activity/);
   assert.match(found.content[0].text, /Index refresh incomplete/);
-  assert.ok(found.structuredContent.next && found.content[0].text.includes(found.structuredContent.next));
+  assert.equal(found.structuredContent.conversation.more, true);
   const { sessionId, entryId, part, offset } = found.structuredContent.conversation.hits[0];
   const read = await call('session_read', { sessionId, entryId, part, offset, maxChars: 2000 });
   assert.match(read.structuredContent.text, /archive needle/);
@@ -112,8 +114,6 @@ test('Pi loader: paginated results, archive paths, self-exclusion and no-UI life
   const typed = await call('session_search', { query: 'archive needle', kind: 'tool_call' });
   assert.deepEqual(typed.structuredContent.conversation.hits, []);
   assert.ok(typed.structuredContent.tools.hits.every(h => h.kind === 'tool_call'));
-  const continuation = { query: 'archive needle', cursor: found.structuredContent.next, limit: 5 };
-  await assert.rejects(call('session_search', continuation, context(selfDir, 'other')), /query|scope|filter/i); // implicit exclusion changed
   appendFileSync(join(otherDir, 'other.jsonl'), JSON.stringify({
     type: 'message', id: 'appended', parentId: 'entry59', timestamp,
     message: { role: 'assistant', content: [{ type: 'text', text: 'archive needle appended evidence' }] }
@@ -121,24 +121,16 @@ test('Pi loader: paginated results, archive paths, self-exclusion and no-UI life
   const appended = await call('session_read', { sessionId: 'other', entryId: 'appended', maxChars: 2000 });
   assert.match(appended.structuredContent.text, /appended evidence/);
   assert.equal(appended.structuredContent.sync.refreshed, false);
-  const continued = await call('session_search', continuation);
-  assert.equal(continued.structuredContent.sync.refreshed, false);
-  assert.equal(continued.structuredContent.conversation.hits.length, 5);
-  assert.equal(continued.structuredContent.tools.hits.length, 5);
-  for (const section of ['conversation', 'tools']) {
-    const seen = new Set(found.structuredContent[section].hits.map(h => `${h.entryId}:${h.part}`));
-    assert.ok(continued.structuredContent[section].hits.every(h => h.entryId !== 'appended' && !seen.has(`${h.entryId}:${h.part}`)));
-  }
+  const refreshed = await call('session_search', { query: 'appended evidence' });
+  assert.equal(refreshed.structuredContent.sync.refreshed, true);
+  assert.equal(refreshed.structuredContent.sync.appended, 1);
+  assert.equal(refreshed.structuredContent.conversation.hits[0].entryId, 'appended');
   const own = await call('session_search', { query: 'archive needle', sessionId: 'self' });
   assert.equal(own.structuredContent.conversation.hits[0].sessionId, 'self');
-  assert.equal(own.structuredContent.sync.appended, 1);
-  await assert.rejects(call('session_search', continuation), /index changed/i);
   const browsing = await call('session_search', { limit: 1 });
-  assert.ok(browsing.structuredContent.next && browsing.content[0].text.includes(browsing.structuredContent.next));
-  const browseNext = await call('session_search', { cursor: browsing.structuredContent.next, limit: 2 });
-  assert.equal(browseNext.structuredContent.sync.refreshed, false);
-  assert.deepEqual([...browsing.structuredContent.sessions, ...browseNext.structuredContent.sessions].map(s => s.sessionId), ['other', 'third']);
-  assert.equal(browseNext.structuredContent.next, undefined);
+  assert.equal(browsing.structuredContent.sync.refreshed, true);
+  assert.equal(browsing.structuredContent.more, true);
+  assert.match(browsing.content[0].text, /Recent sessions \(1\+\)/);
   for (const query of [undefined, ' \t\n ']) {
     const options = query === undefined ? {} : { query };
     for (const filter of [{ tool: 'inspect' }, { tool: '' }, { reasoning: true }]) {
@@ -151,7 +143,7 @@ test('Pi loader: paginated results, archive paths, self-exclusion and no-UI life
     const empty = await call('session_search', { query: 'archive needle', tool });
     assert.deepEqual(empty.structuredContent.conversation.hits, []);
     assert.deepEqual(empty.structuredContent.tools.hits, []);
-    assert.equal(empty.structuredContent.next, undefined);
+    assert.equal(empty.structuredContent.conversation.more || empty.structuredContent.tools.more, false);
   }
   const filtered = await call('session_search', { query: 'archive needle', tool: 'inspect' });
   assert.deepEqual(filtered.structuredContent.conversation.hits, []);
@@ -159,8 +151,7 @@ test('Pi loader: paginated results, archive paths, self-exclusion and no-UI life
   assert.ok(filtered.structuredContent.tools.hits.every(h => h.tool === 'inspect'));
   const alternatives = await call('session_search', { query: 'archive', anyOf: ['missing', 'needle'], tool: 'inspect', limit: 1 });
   assert.equal(alternatives.structuredContent.tools.hits.length, 1);
-  assert.ok(alternatives.structuredContent.next);
-  await assert.rejects(call('session_search', { query: 'archive', anyOf: ['missing'], tool: 'inspect', cursor: alternatives.structuredContent.next }), /query or filters changed/i);
+  assert.equal(alternatives.structuredContent.tools.more, true);
   const literal = await call('session_search', { query: 'needle 0:', mode: 'literal' });
   assert.equal(literal.structuredContent.conversation.hits.length, 1);
   assert.equal(literal.structuredContent.conversation.hits[0].copies, 2);
@@ -184,7 +175,8 @@ test('Pi loader: paginated results, archive paths, self-exclusion and no-UI life
   assert.equal(listing.structuredContent.sessions.length, 50);
   assert.ok(listing.content[0].text.length > 12000);
   for (const session of listing.structuredContent.sessions) assert.ok(listing.content[0].text.includes(session.sessionId + ' · '));
-  assert.ok(listing.structuredContent.next && listing.content[0].text.includes(listing.structuredContent.next));
+  assert.equal(listing.structuredContent.more, true);
+  assert.match(listing.content[0].text, /Recent sessions \(50\+\)/);
   const customDir = join(base, 'custom-archive'); source(customDir, 'custom');
   const custom = await call('session_search', { query: 'archive needle' }, context(customDir, 'ephemeral'));
   assert.equal(custom.structuredContent.sync.root, customDir);

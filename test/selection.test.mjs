@@ -9,7 +9,7 @@ const timestamp = '2026-01-01T00:00:00Z';
 const message = (id, message) => ({ type: 'message', id, parentId: null, timestamp, message });
 const text = [{ type: 'text', text: 'preserve OpenSpec evidence' }];
 
-test('kind selects provenance before ranking, composes with scope and binds continuation', async t => {
+test('kind selects provenance before ranking and composes with scope', async t => {
   const base = mkdtempSync(join(tmpdir(), 'pi-selection-')), root = join(base, 'sessions');
   mkdirSync(root);
   const index = new HistoryIndex(join(base, 'index.db'));
@@ -41,11 +41,10 @@ test('kind selects provenance before ranking, composes with scope and binds cont
   assert.deepEqual(index.search({ query: 'OpenSpec', kind: 'user', tool: 'inspect' }).conversation.hits, []);
   assert.deepEqual(index.search({ query: 'OpenSpec', kind: 'tool_result', tool: 'inspect' }).tools.hits.map(h => h.entryId), ['result']);
   const first = index.search({ query: 'OpenSpec', kind: 'user', limit: 1 });
-  assert.ok(first.next);
-  assert.throws(() => index.search({ query: 'OpenSpec', cursor: first.next }), /filters changed/);
-  assert.throws(() => index.search({ query: 'OpenSpec', kind: 'assistant', cursor: first.next }), /filters changed/);
-  const next = index.search({ query: 'OpenSpec', kind: 'user', cursor: first.next });
-  assert.equal(new Set([...first.conversation.hits, ...next.conversation.hits].map(h => h.entryId)).size, 2);
+  assert.equal(first.conversation.more, true);
+  const all = index.search({ query: 'OpenSpec', kind: 'user', limit: 2 });
+  assert.equal(new Set(all.conversation.hits.map(h => h.entryId)).size, 2);
+  assert.equal(all.conversation.more, false);
   assert.throws(() => index.search({ kind: 'user' }), /require a nonblank query/);
   assert.throws(() => index.search({ query: 'OpenSpec', kind: 'reasoning' }), /kind must be/);
 });

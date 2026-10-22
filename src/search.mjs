@@ -49,7 +49,6 @@ export class HistoryIndex {
       if (version !== 0 && version !== 1) throw new Error('Index schema changed; rebuild this disposable cache.');
       if (version === 0) this.db.exec(`
         CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
-        INSERT OR IGNORE INTO meta VALUES('revision',lower(hex(randomblob(16))));
         CREATE TABLE IF NOT EXISTS session(
           id TEXT PRIMARY KEY, path TEXT UNIQUE NOT NULL, cwd TEXT NOT NULL, cwd_key TEXT NOT NULL,
           started TEXT NOT NULL, updated TEXT NOT NULL, name TEXT, parent TEXT,
@@ -81,8 +80,6 @@ export class HistoryIndex {
       const p = sql => this.db.prepare(sql);
       this.sql = {
         state: p('SELECT * FROM session WHERE path=?'),
-        revision: p("SELECT value FROM meta WHERE key='revision'"),
-        advance: p("UPDATE meta SET value=lower(hex(randomblob(16))) WHERE key='revision'"),
         remove: p('DELETE FROM session WHERE path=?'),
         session: p('INSERT INTO session VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)'),
         findDoc: p('SELECT id FROM doc WHERE key=?'),
@@ -99,13 +96,13 @@ export class HistoryIndex {
 
   getSessionFile(sessionId) {
     const row = this.db.prepare('SELECT path FROM session WHERE id=?').get(sessionId);
-    if (!row) throw new Error(`Session ${sessionId} is not indexed; run session_search without a cursor to refresh the archive.`);
+    if (!row) throw new Error(`Session ${sessionId} is not indexed; run session_search to refresh the archive.`);
     return row.path;
   }
 
   checkRoot(root) {
     const cached = this.db.prepare("SELECT value FROM meta WHERE key='root'").get()?.value;
-    if (!cached) throw new Error('Index is not initialized; run session_search without a cursor first.');
+    if (!cached) throw new Error('Index is not initialized; run session_search first.');
     if (cached !== resolve(root)) throw new Error('This index belongs to another sessions root.');
   }
 
@@ -140,7 +137,6 @@ export class HistoryIndex {
             else errors.push({path, error: e.message});
           }
         }
-        if (removed) this.sql.advance.run();
         this.db.exec('COMMIT');
       } catch (e) { this.db.exec('ROLLBACK'); throw e; }
     }
@@ -206,7 +202,6 @@ export class HistoryIndex {
       const after = await handle.stat();
       if (after.size < snapshot.size || (after.size === snapshot.size && after.mtimeMs !== snapshot.mtimeMs)) throw new Error('Source changed while indexing; retry');
       this.sql.finish.run(name, updated, snapshot.size, snapshot.mtimeMs, indexedBytes, tailStart, tailHash, session);
-      this.sql.advance.run();
       this.db.exec('COMMIT');
       return append ? 'append' : previous ? 'replace' : 'new';
     } catch (e) { this.db.exec('ROLLBACK'); throw e; }
@@ -251,27 +246,14 @@ export class HistoryIndex {
     const dateSql = [], dateArgs = [];
     if (options.since) { dateSql.push(`${dateColumn}>=?`); dateArgs.push(iso(options.since)); }
     if (options.until) { dateSql.push(`${dateColumn}<?`); dateArgs.push(iso(options.until)); }
-    const fingerprint = hash(JSON.stringify([literal ? { literal: query } : query, scope.sql, scope.args, dateSql, dateArgs, !!options.reasoning, tool, ...(kind === undefined ? [] : [kind])]));
-    // The revision, both ranked sections and the next cursor share this read transaction.
-    // No result list or long-lived SQLite snapshot survives the request.
-    const revision = this.sql.revision.get().value;
-    let offsets = [0, 0];
-    if (options.cursor !== undefined) {
-      const fields = /^s1:([a-f0-9]{32}):([a-f0-9]{64}):(0|[1-9]\d*):(0|[1-9]\d*)$/.exec(options.cursor);
-      if (!fields || !fields.slice(3).every(v => Number.isSafeInteger(Number(v)))) throw new Error('Invalid search cursor');
-      if (fields[2] !== fingerprint) throw new Error('Search query or filters changed; start a new search without a cursor.');
-      if (fields[1] !== revision) throw new Error('Search index changed; start a new search without a cursor.');
-      offsets = fields.slice(3).map(Number);
-    }
-    const cursorAt = (conversation, tools) => `s1:${revision}:${fingerprint}:${conversation}:${tools}`;
+    // Both sections, hit owners and copy counts come from one read transaction, consistent under a concurrent sync.
     if (!hasQuery) {
       const filter = [scope.sql, ...dateSql].join(' AND ');
-      const rows = this.db.prepare(`SELECT s.id sessionId,s.path sessionFile,s.cwd,s.name,s.started,s.updated FROM session s WHERE ${filter} ORDER BY s.updated DESC,s.id LIMIT ? OFFSET ?`).all(...scope.args, ...dateArgs, limit + 1, offsets[0]);
-      const sessions = rows.slice(0, limit), more = rows.length > limit;
-      return {sessions, more, ...(more ? {next: cursorAt(offsets[0] + sessions.length, 0)} : {}), ms: +(performance.now() - start).toFixed(1)};
+      const rows = this.db.prepare(`SELECT s.id sessionId,s.path sessionFile,s.cwd,s.name,s.started,s.updated FROM session s WHERE ${filter} ORDER BY s.updated DESC,s.id LIMIT ?`).all(...scope.args, ...dateArgs, limit + 1);
+      return {sessions: rows.slice(0, limit), more: rows.length > limit, ms: +(performance.now() - start).toFixed(1)};
     }
     const results = {};
-    for (const [i, table] of ['conversation', 'tool_io'].entries()) {
+    for (const table of ['conversation', 'tool_io']) {
       const filters = [...dateSql];
       if (!options.reasoning) filters.push("d.kind<>'reasoning'");
       if (tool !== null) filters.push('d.tool=?');
@@ -282,8 +264,8 @@ export class HistoryIndex {
         FROM ${table} f ${literal ? 'CROSS JOIN' : 'JOIN'} doc d ON d.id=f.rowid
         WHERE ${literal ? 'instr(f.text,?)>0' : `f.${table} MATCH ?`} ${filters.length ? 'AND ' + filters.join(' AND ') : ''}
           AND EXISTS(SELECT 1 FROM occurrence o JOIN session s ON s.id=o.session WHERE o.doc=d.id AND ${scope.sql})
-        ORDER BY ${literal ? '' : 'f.rank,'}d.key LIMIT ? OFFSET ?
-      `).all(...args, limit + 1, offsets[i]);
+        ORDER BY ${literal ? '' : 'f.rank,'}d.key LIMIT ?
+      `).all(...args, limit + 1);
       // Literal scans start from the text table: doc-key order would cause random text lookups.
       // Load complete text/snippets only for the displayed page.
       const preview = this.db.prepare(literal ? `SELECT text source FROM ${table} WHERE rowid=?` : `SELECT text source,
@@ -306,10 +288,8 @@ export class HistoryIndex {
         }),
         more: rows.length > limit
       };
-      offsets[i] += Math.min(limit, rows.length);
     }
-    const more = results.conversation.more || results.tools.more;
-    return {...results, ...(more ? {next: cursorAt(...offsets)} : {}), ms: +(performance.now() - start).toFixed(1)};
+    return {...results, ms: +(performance.now() - start).toFixed(1)};
   }
 }
 

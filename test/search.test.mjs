@@ -116,13 +116,11 @@ test('replacement and removal retire text atomically without losing fork copies'
   assert.equal(index.db.prepare('SELECT count(*) n FROM doc').get().n,3);
   for(const table of ['conversation','tool_io']) assert.equal(index.db.prepare(`SELECT count(*) n FROM ${table} WHERE ${table} MATCH 'retired'`).get().n,0);
   assert.equal(index.search({query:'shared'}).conversation.hits[0].copies,2);
-  const beforeFailure=index.search({query:'needle',limit:1}).next;
   writeFileSync(a,jsonl([header('a'),message('tentative',null,'uncommitted evidence')])+'{bad}\n');
   await assert.rejects(index.indexFile(a));
   assert.equal(index.search({query:'replacement'}).conversation.hits.length,1);
   assert.equal(index.search({query:'shared'}).conversation.hits[0].copies,2);
   assert.equal(index.search({query:'uncommitted'}).conversation.hits.length,0);
-  assert.doesNotThrow(()=>index.search({query:'needle',limit:1,cursor:beforeFailure}));
   rmSync(a);await index.sync(root);
   const remaining=index.search({query:'shared'}).conversation.hits[0];
   assert.equal(remaining.copies,1);assert.equal(remaining.sessionId,'fork');
@@ -164,8 +162,8 @@ test('descendant scopes preserve POSIX case, Windows normalization and directory
   assert.deepEqual(index.search({query:'needle',cwd:'/home/work',descendants:true}).conversation.hits.map(h=>h.sessionId).sort(),['child','lower']);
 });
 
-test('ranked continuation reaches beyond fifty hits and binds query and index state', async t=>{
-  const {base,root,index}=setup(t), path=join(root,'a.jsonl');
+test('ranked sections truncate independently at fifty hits', async t=>{
+  const {root,index}=setup(t), path=join(root,'a.jsonl');
   const entries=[header('a')];let parent=null;
   for(let i=0;i<51;i++){
     const id=`e${String(i).padStart(2,'0')}`;
@@ -179,48 +177,13 @@ test('ranked continuation reaches beyond fifty hits and binds query and index st
   writeFileSync(path,jsonl(entries));await index.sync(root);
   const first=index.search({query:'needle',limit:50});
   assert.equal(first.conversation.hits.length,50);
-  assert.equal(first.conversation.more,true);assert.ok(first.next);
+  assert.equal(first.conversation.more,true);
   assert.deepEqual(first.conversation.hits.map(h=>h.entryId),Array.from({length:50},(_,i)=>`e${String(i).padStart(2,'0')}`));
   assert.equal(first.tools.hits.length,2);assert.equal(first.tools.more,false);
-  assert.throws(()=>index.search({query:'needle',cursor:'invalid'}),/Invalid search cursor/);
-  assert.throws(()=>index.search({query:'different',cursor:first.next}),/query or filters changed/);
-  assert.throws(()=>index.search({query:'needle',cwd:'C:/Project',cursor:first.next}),/query or filters changed/);
-  assert.throws(()=>index.search({query:'needle',tool:'',cursor:first.next}),/query or filters changed/);
-  assert.equal((await index.sync(root)).changed,0);
-  const reopened=new HistoryIndex(join(base,'index.db'));
-  try{
-    const last=reopened.search({query:'needle',cursor:first.next,limit:1});
-    assert.deepEqual(last.conversation.hits.map(h=>h.entryId),['e50']);
-    assert.equal(last.tools.hits.length,0);assert.equal(last.next,undefined);
-  }finally{reopened.close();}
-  const seen=[];let cursor;
-  do{
-    const page=index.search({query:'needle',cursor,limit:7});
-    seen.push(...page.conversation.hits.map(h=>h.entryId));cursor=page.next;
-  }while(cursor);
-  assert.equal(seen.length,51);assert.equal(new Set(seen).size,51);
-  appendFileSync(path,jsonl([message('later',parent,'unrelated update')]));await index.sync(root);
-  assert.throws(()=>index.search({query:'needle',cursor:first.next}),/index changed/);
-  const current=index.search({query:'needle'});
-  const rebuilt=new HistoryIndex(join(base,'rebuilt.db'));
-  try{
-    await rebuilt.sync(root);
-    assert.throws(()=>rebuilt.search({query:'needle',cursor:current.next}),/index changed/);
-  }finally{rebuilt.close();}
-  appendFileSync(path,jsonl([message('tentative','later','uncommitted needle')])+'{bad}\n');
-  assert.equal((await index.sync(root)).errors.length,1);
-  assert.doesNotThrow(()=>index.search({query:'needle',cursor:current.next})); // rollback preserves the revision
-  entries[1].message.content[0].text='other needle';
-  writeFileSync(path,jsonl([...entries,message('later',parent,'unrelated update')]));
-  const future=new Date(Date.now()+1000);utimesSync(path,future,future);
-  await index.sync(root);
-  assert.throws(()=>index.search({query:'needle',cursor:current.next}),/index changed/);
-  const beforeRemoval=index.search({query:'needle'}).next;
-  rmSync(path);await index.sync(root);
-  assert.throws(()=>index.search({query:'needle',cursor:beforeRemoval}),/index changed/);
+  assert.deepEqual(index.search({query:'needle substantive'}).conversation.hits.map(h=>h.entryId),['e50']); // narrowing reaches the truncated hit
 });
 
-test('browse continuation uses a total order and permits a different page size', async t=>{
+test('browse listing uses a total order', async t=>{
   const {root,index}=setup(t);
   for(let i=6;i>=0;i--){
     const id=`s${i}`;writeFileSync(join(root,id+'.jsonl'),jsonl([header(id),message(id,null,'text')]));
@@ -232,13 +195,10 @@ test('browse continuation uses a total order and permits a different page size',
     assert.deepEqual(filtered.conversation.hits,[]);assert.deepEqual(filtered.tools.hits,[]);
   }
   const options={cwd:'C:/Project',excludeSession:'s2',reasoning:false};
-  const first=index.search({...options,limit:2});assert.ok(first.next);
-  assert.deepEqual(first.sessions.map(s=>s.sessionId),['s0','s1']);
-  const second=index.search({...options,cursor:first.next,limit:3});
-  assert.deepEqual(second.sessions.map(s=>s.sessionId),['s3','s4','s5']);
-  const last=index.search({...options,cursor:second.next});
-  assert.deepEqual(last.sessions.map(s=>s.sessionId),['s6']);assert.equal(last.next,undefined);
-  assert.throws(()=>index.search({cursor:first.next}),/query or filters changed/);
+  const first=index.search({...options,limit:2});
+  assert.deepEqual(first.sessions.map(s=>s.sessionId),['s0','s1']);assert.equal(first.more,true);
+  const all=index.search({...options,limit:6});
+  assert.deepEqual(all.sessions.map(s=>s.sessionId),['s0','s1','s3','s4','s5','s6']);assert.equal(all.more,false);
 });
 
 test('failed root traversal preserves indexed evidence', async t=>{

@@ -5,7 +5,6 @@ import { createHash } from 'node:crypto';
 import { isToolPart, sourceParts } from './content.mjs';
 import { readLines } from './jsonl.mjs';
 
-const VERSION = 'r3'; // cursor format; includes the selected view and its scope
 const VIEWS = new Set(['outline', 'passage', 'entry', 'conversation', 'turn']);
 const MIN_CHARS = 2000; // leave room for orientation and the focused passage
 const CLIP = 600; // characters shown of tool I/O, summaries and custom messages away from the focus
@@ -123,15 +122,13 @@ function leadIn(text, offset, before) {
 }
 
 function encodeCursor(state) {
-  return VERSION + ':' + Buffer.from(JSON.stringify(state)).toString('base64url');
+  return Buffer.from(JSON.stringify(state)).toString('base64url');
 }
 
 function decodeCursor(cursor) {
-  if (!cursor.startsWith(VERSION + ':')) fail('cursor is not from this reader version');
   try {
-    const encoded = cursor.slice(VERSION.length + 1);
-    if (encoded.length > 8192 || !/^[A-Za-z0-9_-]+$/.test(encoded)) throw new Error();
-    const state = JSON.parse(Buffer.from(encoded, 'base64url').toString());
+    if (cursor.length > 8192 || !/^[A-Za-z0-9_-]+$/.test(cursor)) throw new Error();
+    const state = JSON.parse(Buffer.from(cursor, 'base64url').toString());
     if (!VIEWS.has(state.view) || typeof state.session !== 'string' || typeof state.branchEnd !== 'string'
       || typeof state.entryId !== 'string' || typeof state.part !== 'string'
       || !Number.isInteger(state.offset) || state.offset < 0
@@ -159,7 +156,7 @@ export async function readSession(file, { entryId, part, offset = 0, branchEnd, 
   const path = ancestry(s, branchEnd);
   if (entryId && !path.some(e => e.id === entryId)) fail(`entry ${entryId} is not on the branch ending at ${branchEnd}`);
   let units = path.flatMap(unitsOf);
-  const cursorAt = (_v, u, from = 0, text = '') => encodeCursor({ view, session, branchEnd, entryId: u.id, part: u.part, offset: from, hash: text ? digest(text) : undefined });
+  const cursorAt = (u, from = 0, text = '') => encodeCursor({ view, session, branchEnd, entryId: u.id, part: u.part, offset: from, hash: text ? digest(text) : undefined });
   let page;
   if (view === 'outline') {
     page = outline(s, path, units, branchEnd, cursor && { id: entryId, part }, maxChars, cursorAt);
@@ -249,9 +246,9 @@ function passage(units, { entryId, part, offset, hash }, max, cursorAt, focused 
       if (full && (isFocus || take >= 500)) { // split a fully shown part across pages
         if (take <= 0) fail('maxChars is too small for the focus header and context');
         add(page, u, h + u.text.slice(from, from + take) + '\n', from, from + take);
-        return { ...page, next: cursorAt('p', u, from + take, u.text) };
+        return { ...page, next: cursorAt(u, from + take, u.text) };
       }
-      return { ...page, next: cursorAt('p', u, 0, u.text) };
+      return { ...page, next: cursorAt(u, 0, u.text) };
     }
     return page;
   };
@@ -338,7 +335,7 @@ function outline(s, path, units, branchEnd, resume, max, cursorAt) {
   for (let i = first; i < items.length; i++) {
     const u = items[i];
     const line = `${u.id} · ${stamp(u.at)} · ${u.kind === 'summary' ? `[${u.label} summary] ` : ''}${u.text.replace(/\s+/g, ' ').slice(0, 140)}\n`;
-    if (text.length + line.length > max) return { text, next: cursorAt('o', u) };
+    if (text.length + line.length > max) return { text, next: cursorAt(u) };
     text += line;
   }
   return { text };

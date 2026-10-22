@@ -6,16 +6,11 @@ Conversation and tool activity have separate result sections, so large tool outp
 Requires Node.js 22.19 or newer and Pi's extension APIs; tested with Pi 1.3.0 on Node.js 26.12.0.
 Only session-format v3 JSONL files are supported.
 
-## Load
-
-From this checkout, load it for one Pi invocation:
+## Install
 
 ```sh
-pi -e ./index.ts
+pi install git:github.com/vadimtrifonov/pi-session-search
 ```
-
-Register this checkout in Pi's user settings with `pi install ./`.
-Pi supplies the declared peer dependencies; the extension needs no build step.
 
 ## Search
 
@@ -53,27 +48,19 @@ The tool filter matches the recorded name exactly.
   Tool activity includes call arguments, results, and direct shell commands/output.
   Readable reasoning is indexed but searched only with `reasoning: true`; image payloads and encrypted reasoning signatures are excluded.
 
-The default page contains five hits per section, up to fifty.
 Word results use BM25 rank with a stable content-key tiebreaker.
-Literal results use content-key order only, with no relevance or recency preference.
+Literal results use content-key order only, with no relevance or recency preference, so hits beyond `limit` are not lower-ranked.
 Session listings use last activity followed by session ID.
 Model-facing text includes every returned hit or session, with hit previews of at most 600 characters.
-`limit` controls page size; larger limits produce longer responses.
-Programmatic callers receive the same page through `structuredContent`.
-
-When `next` is returned, repeat the query and filters with `cursor: next` to advance both result sections or the session listing.
-`limit` may change between pages.
-The cursor binds the effective scope, including the calling-session exclusion, and one index revision.
-Continuation does not refresh the index.
-An index update or rebuild invalidates the cursor explicitly; restart without it rather than silently skipping or repeating results.
-Starting another fresh search—even one that only indexes changes in an excluded session—can invalidate earlier cursors because corpus statistics affect ranking.
-This fixes the indexed result order, not the source files.
+`limit` sets the hits per section, or sessions when browsing: five by default, up to fifty; larger limits produce longer responses.
+`more` marks a section or listing whose further results were omitted, shown as `+` after its count; raise `limit` or narrow the query, filters, or dates.
+Programmatic callers receive the same results through `structuredContent`.
 
 ## Read
 
 `session_read` opens a search hit using its four reference fields.
-A fresh search or session listing must first index the session's file location.
-Reads load that source file directly without refreshing the index; an unknown session ID requires a fresh search.
+A search or session listing must first index the session's file location.
+Reads load that source file directly without refreshing the index; an unknown session ID requires a search.
 Without `entryId`, a read returns a prompt/summary outline and other recorded branch ends.
 A focused read follows the newest recorded descendant of its anchor unless `branchEnd` selects another ancestry.
 This is recorded history, not a reconstruction of model context or the branch currently selected in a running Pi session.
@@ -125,9 +112,9 @@ Other session directories are searched as their own archives.
 `sync.root` reports the effective scope; the extension does not infer a broader archive from an SDK-specific directory layout.
 The agent directory comes from Pi's CLI/environment configuration, normally `~/.pi/agent`.
 
-Search without a cursor refreshes a disposable SQLite index under `<agent-dir>/cache/session-search/`, keyed by archive root.
+Each search refreshes a disposable SQLite index under `<agent-dir>/cache/session-search/`, keyed by archive root.
 The first such search builds the index; subsequent searches reuse it.
-`sync.refreshed` distinguishes a completed refresh attempt from a read or continuation that did not scan the archive.
+`sync.refreshed` distinguishes a completed refresh attempt from a read, which does not scan the archive.
 Only refresh attempts include file counts, pending bytes, and errors.
 Work runs in short-lived workers, serialized per archive within a Pi instance, with no background scanner.
 Source files are read without modification.
@@ -138,7 +125,7 @@ Each file update or removal is atomic, including its changes to the full-text in
 A failed file refresh preserves its previous indexed evidence; failed directory traversal does not purge unseen sessions.
 Incremental refresh assumes older entries are unchanged when a file grows with the same indexed tail.
 Manual edits that evade that check, or preserve file size and modification time, require a cache rebuild.
-Remove the cache while no calls are running to rebuild it on the next fresh search; incompatible cache schemas also require rebuilding.
+Remove the cache while no calls are running to rebuild it on the next search; incompatible cache schemas also require rebuilding.
 
 ## Tests
 

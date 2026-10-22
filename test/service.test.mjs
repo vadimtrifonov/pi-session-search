@@ -56,7 +56,7 @@ test('lazy worker service serializes jobs, refreshes searches, and continues sou
   assert.equal(fresh.sync.appended, 1);
 });
 
-test('source reads preserve search pages until a fresh query refreshes the index', async t => {
+test('source reads do not refresh the index; the next search does', async t => {
   const { service, root, file } = setup(t);
   const facts = Array.from({ length: 6 }, (_, i) => message(`fact${i}`, i ? `fact${i-1}` : 'answer', 'assistant', text(`needle fact ${i}`)));
   appendFileSync(file, jsonl(facts));
@@ -65,34 +65,27 @@ test('source reads preserve search pages until a fresh query refreshes the index
   ]));
   const query = { query: 'needle', limit: 2 };
   const first = await service.search(query);
-  assert.ok(first.next);
+  assert.equal(first.conversation.more, true);
   assert.equal(first.tools.hits.length, 1);
   appendFileSync(file, jsonl([message('newfact', 'fact5', 'assistant', text('needle appended evidence'))]));
   const source = await service.read({ sessionId: 'session-a', entryId: 'newfact', maxChars: 2000 });
   assert.match(source.text, /needle appended evidence/);
   assert.deepEqual(source.sync, { root, refreshed: false });
-  const second = await service.search({ ...query, cursor: first.next, limit: 3 });
-  assert.deepEqual(second.sync, { root, refreshed: false });
-  assert.equal(second.conversation.hits.length, 3);
-  assert.deepEqual(second.tools.hits, []);
-  const last = await service.search({ ...query, cursor: second.next, limit: 5 });
-  assert.equal(last.next, undefined);
-  const ids = [...first.conversation.hits, ...second.conversation.hits, ...last.conversation.hits].map(h => h.entryId);
-  assert.deepEqual(ids.sort(), facts.map(e => e.id).sort()); // no new source entry, repeats, or gaps
 
   const fresh = await service.search({ query: 'appended evidence' });
   assert.equal(fresh.sync.refreshed, true);
   assert.equal(fresh.sync.appended, 1);
   assert.equal(fresh.conversation.hits[0].entryId, 'newfact');
-  await assert.rejects(service.search({ ...query, cursor: first.next }), /index changed/i);
+  const all = await service.search({ ...query, limit: 10 });
+  assert.equal(all.conversation.more, false);
+  assert.deepEqual(all.conversation.hits.map(h => h.entryId).sort(), [...facts.map(e => e.id), 'newfact'].sort());
 
   const browse = await service.search({ limit: 1 });
-  assert.ok(browse.next);
-  const remainder = await service.search({ limit: 2, cursor: browse.next });
-  assert.deepEqual(remainder.sync, { root, refreshed: false });
-  assert.deepEqual([...browse.sessions, ...remainder.sessions].map(s => s.sessionId), ['session-a', 'session-b', 'session-c']);
-  assert.equal(remainder.next, undefined);
-  await assert.rejects(service.search({ limit: 1, cursor: browse.next, session: 'session-a' }), /query|scope|filter/i);
+  assert.equal(browse.sync.refreshed, true);
+  assert.equal(browse.more, true);
+  const listing = await service.search({ limit: 3 });
+  assert.deepEqual(listing.sessions.map(s => s.sessionId), ['session-a', 'session-b', 'session-c']);
+  assert.equal(listing.more, false);
 });
 
 test('active and queued cancellation do not poison the next worker job', { timeout: 10000 }, async t => {
