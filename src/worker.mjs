@@ -22,7 +22,7 @@ try {
   } else if (operation === 'read') {
     const { sessionId, ...readOptions } = options;
     const file = index.getSessionFile(sessionId);
-    result = await readSession(file, readOptions);
+    result = { ...await readSession(file, readOptions), sessionFile: file };
     if (result.sessionId !== sessionId) throw new Error(`Session file changed identity: expected ${sessionId}, found ${result.sessionId}`);
   } else {
     throw new Error(`Unknown session history operation: ${operation}`);

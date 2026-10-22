@@ -66,6 +66,19 @@ test('Pi loader: paginated results, archive paths, self-exclusion and no-UI life
     assert.equal(result.content[0].type, 'text');
     return result;
   }
+  function allAnchorsVisible(result) {
+    const text = result.content[0].text;
+    const refs = [...text.matchAll(/^   (\{"sessionId":.*\})$/gm)].map(m => JSON.parse(m[1]));
+    const expected = ['conversation', 'tools'].flatMap(key => result.structuredContent[key].hits.map(
+      ({ sessionId, entryId, part, offset }) => ({ sessionId, entryId, part, offset })
+    ));
+    assert.deepEqual(refs, expected);
+    const previews = [...text.matchAll(/^   \{"sessionId":.*\}\n   ([^\n]*)/gm)];
+    assert.equal(previews.length, expected.length);
+    assert.ok(previews.every(m => m[1].length <= 600));
+    assert.doesNotMatch(text, /further hits in structuredContent/);
+    if (result.structuredContent.next) assert.ok(text.includes(result.structuredContent.next));
+  }
   const found = await call('session_search', { query: 'archive needle', limit: 50 });
   assert.equal(found.structuredContent.sync.root, join(agentDir, 'sessions'));
   assert.equal(found.structuredContent.sync.refreshed, true);
@@ -74,8 +87,8 @@ test('Pi loader: paginated results, archive paths, self-exclusion and no-UI life
   assert.equal(found.structuredContent.conversation.hits.length, 50);
   assert.equal(found.structuredContent.tools.hits.length, 50);
   assert.ok(found.structuredContent.conversation.hits.every(h => h.sessionId === 'other'));
-  assert.ok(found.content[0].text.length <= 12000);
-  assert.match(found.content[0].text, /further hits in structuredContent/);
+  allAnchorsVisible(found);
+  assert.ok(found.content[0].text.length > 12000);
   assert.match(found.content[0].text, /Tool activity/);
   assert.match(found.content[0].text, /Index refresh incomplete/);
   assert.ok(found.structuredContent.next && found.content[0].text.includes(found.structuredContent.next));
@@ -86,6 +99,19 @@ test('Pi loader: paginated results, archive paths, self-exclusion and no-UI life
   assert.equal(read.structuredContent.sync.refreshed, false);
   assert.match(read.content[0].text, /index not refreshed/);
   assert.doesNotMatch(read.content[0].text, /Index refresh incomplete/);
+  const exact = await call('session_read', { sessionId, entryId, view: 'entry', maxChars: 2000 });
+  assert.ok(exact.structuredContent.spans.every(s => s.entryId === entryId));
+  const conversation = await call('session_read', { sessionId, view: 'conversation', maxChars: 2000 });
+  assert.ok(conversation.structuredContent.spans.every(s => s.kind === 'assistant'));
+  const evidence = await call('session_read', { sessionId, entryId, view: 'turn', maxChars: 2000 });
+  assert.ok(evidence.structuredContent.activities.length > 0 && evidence.structuredContent.next);
+  assert.equal(evidence.structuredContent.turn.anchor, entryId);
+  const evidenceNext = await call('session_read', { sessionId, cursor: evidence.structuredContent.next, maxChars: 2000 });
+  assert.equal(evidenceNext.structuredContent.view, 'turn');
+  await assert.rejects(call('session_read', { sessionId, view: 'entry', cursor: evidence.structuredContent.next }), /view differs/);
+  const typed = await call('session_search', { query: 'archive needle', kind: 'tool_call' });
+  assert.deepEqual(typed.structuredContent.conversation.hits, []);
+  assert.ok(typed.structuredContent.tools.hits.every(h => h.kind === 'tool_call'));
   const continuation = { query: 'archive needle', cursor: found.structuredContent.next, limit: 5 };
   await assert.rejects(call('session_search', continuation, context(selfDir, 'other')), /query|scope|filter/i); // implicit exclusion changed
   appendFileSync(join(otherDir, 'other.jsonl'), JSON.stringify({
@@ -131,6 +157,34 @@ test('Pi loader: paginated results, archive paths, self-exclusion and no-UI life
   assert.deepEqual(filtered.structuredContent.conversation.hits, []);
   assert.ok(filtered.structuredContent.tools.hits.length > 0);
   assert.ok(filtered.structuredContent.tools.hits.every(h => h.tool === 'inspect'));
+  const alternatives = await call('session_search', { query: 'archive', anyOf: ['missing', 'needle'], tool: 'inspect', limit: 1 });
+  assert.equal(alternatives.structuredContent.tools.hits.length, 1);
+  assert.ok(alternatives.structuredContent.next);
+  await assert.rejects(call('session_search', { query: 'archive', anyOf: ['missing'], tool: 'inspect', cursor: alternatives.structuredContent.next }), /query or filters changed/i);
+  const literal = await call('session_search', { query: 'needle 0:', mode: 'literal' });
+  assert.equal(literal.structuredContent.conversation.hits.length, 1);
+  assert.equal(literal.structuredContent.conversation.hits[0].copies, 2);
+  assert.ok(literal.structuredContent.conversation.hits.every(h => h.excerpt.includes('needle 0:')));
+  assert.equal((await call('session_search', { query: 'Needle 0:', mode: 'literal' })).structuredContent.conversation.hits.length, 0);
+  await assert.rejects(call('session_search', { query: 'needle', mode: 'literal', anyOf: ['archive'] }), /only in words mode/);
+  const typedAlternatives = await call('session_search', { anyOf: ['needle'], kind: 'tool_call', tool: 'inspect' });
+  assert.ok(typedAlternatives.structuredContent.tools.hits.length > 0);
+  assert.deepEqual(typedAlternatives.structuredContent.conversation.hits, []);
+  const catalogDir = join(base, 'catalog');
+  for (let i = 0; i < 51; i++) {
+    const id = `catalog-${i}`;
+    source(catalogDir, id);
+    appendFileSync(join(catalogDir, `${id}.jsonl`), JSON.stringify({
+      type: 'session_info', id: 'label', parentId: 'entry0', timestamp,
+      name: 'Detailed investigation and verification notes '.repeat(5)
+    }) + '\n');
+  }
+  const catalogCtx = context(catalogDir, 'ephemeral');
+  const listing = await call('session_search', { limit: 50 }, catalogCtx);
+  assert.equal(listing.structuredContent.sessions.length, 50);
+  assert.ok(listing.content[0].text.length > 12000);
+  for (const session of listing.structuredContent.sessions) assert.ok(listing.content[0].text.includes(session.sessionId + ' · '));
+  assert.ok(listing.structuredContent.next && listing.content[0].text.includes(listing.structuredContent.next));
   const customDir = join(base, 'custom-archive'); source(customDir, 'custom');
   const custom = await call('session_search', { query: 'archive needle' }, context(customDir, 'ephemeral'));
   assert.equal(custom.structuredContent.sync.root, customDir);

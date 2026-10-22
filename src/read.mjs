@@ -2,10 +2,11 @@
 // ancestry that continues inside oversized parts. Parts, pointers and text come from content.mjs.
 import { open } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
-import { sourceParts } from './content.mjs';
+import { isToolPart, sourceParts } from './content.mjs';
 import { readLines } from './jsonl.mjs';
 
-const VERSION = 'r2'; // cursor format
+const VERSION = 'r3'; // cursor format; includes the selected view and its scope
+const VIEWS = new Set(['outline', 'passage', 'entry', 'conversation', 'turn']);
 const MIN_CHARS = 2000; // leave room for orientation and the focused passage
 const CLIP = 600; // characters shown of tool I/O, summaries and custom messages away from the focus
 const FULL = new Set(['user', 'assistant']);
@@ -70,7 +71,21 @@ function unitsOf(e) {
     const images = Array.isArray(e.message.content) ? e.message.content.filter(b => b.type === 'image').length : 0;
     parts.push({ part: '/message/content', kind: 'user', text: images ? `[${images} image${images === 1 ? '' : 's'}]` : '[empty user message]' });
   }
-  return parts.map(p => ({ ...p, id: e.id, at: e.timestamp, label: labelOf(e, p) }));
+  // Empty calls/results still belong in a turn inventory and must be openable.
+  const m = e.message;
+  if (m?.role === 'assistant' && Array.isArray(m.content)) {
+    m.content.forEach((b, i) => {
+      const part = `/message/content/${i}/arguments`;
+      if (b.type === 'toolCall' && !parts.some(p => p.part === part)) {
+        parts.push({ part, kind: 'tool_call', text: '[no readable arguments]', tool: b.name, identity: b.id });
+      }
+    });
+    parts.sort((a, b) => Number(a.part.split('/')[3]) - Number(b.part.split('/')[3]));
+  }
+  if (m?.role === 'toolResult' && !parts.length) {
+    parts.push({ part: '/message/content', kind: 'tool_result', text: '[no readable output]', tool: m.toolName, identity: [m.toolCallId, !!m.isError] });
+  }
+  return parts.map(p => ({ ...p, id: e.id, at: e.timestamp, index: e.index, label: labelOf(e, p) }));
 }
 
 function labelOf(e, p) {
@@ -85,17 +100,18 @@ function labelOf(e, p) {
   }
 }
 
-function head(u, from) {
+function head(u, from, provenance = false) {
   let h = `--- ${u.kind}${u.label ? ` ${u.label}` : ''} ${u.id}`;
-  if (u.kind === 'user') h += ` · ${stamp(u.at)}`;
+  if (u.kind === 'user' || provenance) h += ` · ${provenance ? u.at ?? '' : stamp(u.at)}`;
+  if (provenance) h += ` · ${u.part}`;
   if (from) h += ` · from char ${from} of ${u.text.length}`;
   return h + '\n';
 }
 
-function render(u, from, clip) {
+function render(u, from, clip, provenance = false) {
   const body = u.text.slice(from, clip == null ? undefined : from + clip);
   const rest = u.text.length - from - body.length;
-  return head(u, from) + body + (rest > 0 ? `\n… [+${rest} chars of ${u.part}]` : '') + '\n';
+  return head(u, from, provenance) + body + (rest > 0 ? `\n… [+${rest} chars of ${u.part}]` : '') + '\n';
 }
 
 // Keep some lead-in, but reserve at least half the available body for text at/after the offset.
@@ -106,33 +122,71 @@ function leadIn(text, offset, before) {
   return newline >= 0 && newline < offset ? newline + 1 : floor;
 }
 
-export async function readSession(file, { entryId, part, offset = 0, branchEnd, cursor, maxChars = 12000 } = {}) {
-  if (!Number.isInteger(maxChars) || maxChars < MIN_CHARS) fail(`maxChars must be an integer of at least ${MIN_CHARS}`);
+function encodeCursor(state) {
+  return VERSION + ':' + Buffer.from(JSON.stringify(state)).toString('base64url');
+}
+
+function decodeCursor(cursor) {
+  if (!cursor.startsWith(VERSION + ':')) fail('cursor is not from this reader version');
+  try {
+    const encoded = cursor.slice(VERSION.length + 1);
+    if (encoded.length > 8192 || !/^[A-Za-z0-9_-]+$/.test(encoded)) throw new Error();
+    const state = JSON.parse(Buffer.from(encoded, 'base64url').toString());
+    if (!VIEWS.has(state.view) || typeof state.session !== 'string' || typeof state.branchEnd !== 'string'
+      || typeof state.entryId !== 'string' || typeof state.part !== 'string'
+      || !Number.isInteger(state.offset) || state.offset < 0
+      || (state.view !== 'outline' && !/^[a-f0-9]{16}$/.test(state.hash))
+      || (state.view === 'turn' && typeof state.anchor !== 'string')) throw new Error();
+    return state;
+  } catch { fail('invalid read cursor'); }
+}
+
+export async function readSession(file, { entryId, part, offset = 0, branchEnd, cursor, view, maxChars = 12000 } = {}) {
+  if (!Number.isInteger(maxChars) || maxChars < MIN_CHARS || maxChars > 12000) fail(`maxChars must be an integer of at least ${MIN_CHARS} and at most 12000`);
   const s = await loadSession(file), session = s.header.id;
-  let view = entryId ? 'p' : 'o', hash;
+  let hash, anchor;
   if (cursor) {
-    const f = cursor.split(':');
-    if (f[0] !== VERSION) fail('cursor is not from this reader version');
-    if (f.length !== 8 || !['p', 'o'].includes(f[1]) || (f[1] === 'p' && !/^[a-f0-9]{16}$/.test(f[7]))) fail('invalid read cursor');
-    if (f[2] !== session) fail(`cursor belongs to session ${f[2]}, not ${session}`);
-    [, view, , branchEnd, entryId, part, offset, hash] = f;
-    offset = Number(offset);
+    const state = decodeCursor(cursor);
+    if (state.session !== session) fail(`cursor belongs to session ${state.session}, not ${session}`);
+    if (view !== undefined && view !== state.view) fail('view differs from the read cursor');
+    ({ view, branchEnd, entryId, part, offset, hash, anchor } = state);
   }
+  view ??= entryId ? 'passage' : 'outline';
+  if (!VIEWS.has(view)) fail('unknown read view');
+  if (['entry', 'turn', 'passage'].includes(view) && !entryId) fail(`${view} view requires entryId`);
+  if (view === 'turn' && !cursor && (part !== undefined || offset !== 0)) fail('turn view accepts an entryId, not a part or offset');
   branchEnd ??= entryId ? newestUnder(s, entryId) : s.entries.at(-1)?.id ?? fail('session has no entries');
   const path = ancestry(s, branchEnd);
   if (entryId && !path.some(e => e.id === entryId)) fail(`entry ${entryId} is not on the branch ending at ${branchEnd}`);
-  const units = path.flatMap(unitsOf);
-  const cursorAt = (v, u, from = '', text = '') => [VERSION, v, session, branchEnd, u.id, u.part, from, text && digest(text)].join(':');
-  const page = view === 'o'
-    ? outline(s, path, units, branchEnd, cursor && { id: entryId, part }, maxChars, cursorAt)
-    : passage(units, { entryId, part, offset, hash }, maxChars, cursorAt);
-  return { sessionId: session, branchEnd, ...page };
+  let units = path.flatMap(unitsOf);
+  const cursorAt = (_v, u, from = 0, text = '') => encodeCursor({ view, session, branchEnd, entryId: u.id, part: u.part, offset: from, hash: text ? digest(text) : undefined });
+  let page;
+  if (view === 'outline') {
+    page = outline(s, path, units, branchEnd, cursor && { id: entryId, part }, maxChars, cursorAt);
+  } else if (view === 'turn') {
+    page = turnInventory(path, units, { anchor: anchor ?? entryId, entryId, part, hash, resumed: !!cursor }, maxChars,
+      (u, anchor, hash) => encodeCursor({ view, session, branchEnd, entryId: u.id, part: u.part, offset: 0, anchor, hash }));
+  } else {
+    if (view === 'entry') units = units.filter(u => u.id === entryId);
+    if (view === 'conversation') {
+      const selected = units.filter(u => u.id === entryId && (part === undefined ? u.kind !== 'reasoning' : u.part === part));
+      if (selected.length && !selected.some(u => FULL.has(u.kind))) {
+        const target = part === undefined ? `entry ${entryId}` : `part ${part} of entry ${entryId}`;
+        fail(`${target} is excluded from conversation view, which only shows user and assistant text. Use view:"entry" to read it.`);
+      }
+      units = units.filter(u => FULL.has(u.kind));
+      entryId ??= units[0]?.id;
+      if (!entryId) return { sessionId: session, branchEnd, view, text: 'No user or assistant text on this branch.\n', spans: [] };
+    }
+    page = passage(units, { entryId, part, offset, hash }, maxChars, cursorAt, view !== 'passage');
+  }
+  return { sessionId: session, branchEnd, view, ...page };
 }
 
-function passage(units, { entryId, part, offset, hash }, max, cursorAt) {
+function passage(units, { entryId, part, offset, hash }, max, cursorAt, focused = false) {
   const resumed = hash !== undefined;
   let at = units.findIndex(u => u.id === entryId && (part === undefined ? u.kind !== 'reasoning' : u.part === part));
-  if (at < 0 && part === undefined) at = units.findIndex(u => u.id === entryId);
+  if (at < 0 && part === undefined && !focused) at = units.findIndex(u => u.id === entryId);
   if (at < 0) fail(part === undefined ? `entry ${entryId} has no readable text` : `entry ${entryId} has no part ${part}`);
   const focus = units[at];
   if (resumed && digest(focus.text) !== hash) fail(`entry ${entryId} changed since the cursor was issued`);
@@ -141,7 +195,7 @@ function passage(units, { entryId, part, offset, hash }, max, cursorAt) {
   const prefix = { text: '', spans: [] };
   const add = (page, u, t, from, to) => { page.text += t; page.spans.push({ entryId: u.id, part: u.part, kind: u.kind, from, to }); };
 
-  if (!resumed && focus.kind !== 'user') { // orientation: the whole user entry, then nearest context, within a quarter page
+  if (!focused && !resumed && focus.kind !== 'user') { // orientation: the whole user entry, then nearest context, within a quarter page
     let p = at - 1;
     while (p >= 0 && units[p].kind !== 'user') p--;
     let first = p;
@@ -185,13 +239,13 @@ function passage(units, { entryId, part, offset, hash }, max, cursorAt) {
       const room = budget - page.text.length;
       let from = 0;
       if (isFocus) {
-        const bodyRoom = room - head(u, offset).length - 1;
+        const bodyRoom = room - head(u, offset, focused).length - 1;
         from = resumed ? offset : leadIn(u.text, offset, Math.max(0, Math.floor(bodyRoom / 2)));
       }
-      const full = FULL.has(u.kind) || (isFocus && (!resumed || from > 0));
-      const t = render(u, from, full ? null : CLIP);
+      const full = focused || FULL.has(u.kind) || (isFocus && (!resumed || from > 0));
+      const t = render(u, from, full ? null : CLIP, focused);
       if (t.length <= room) { add(page, u, t, from, full ? u.text.length : Math.min(u.text.length, CLIP)); continue; }
-      const h = head(u, from), take = room - h.length - 1;
+      const h = head(u, from, focused), take = room - h.length - 1;
       if (full && (isFocus || take >= 500)) { // split a fully shown part across pages
         if (take <= 0) fail('maxChars is too small for the focus header and context');
         add(page, u, h + u.text.slice(from, from + take) + '\n', from, from + take);
@@ -202,7 +256,7 @@ function passage(units, { entryId, part, offset, hash }, max, cursorAt) {
     return page;
   };
   let page = fill(max);
-  if (!resumed) {
+  if (!focused && !resumed) {
     let later;
     for (let i = at + 1; i < units.length; i++) {
       if (units[i].kind === 'user' && units[i].id !== focus.id) break;
@@ -221,6 +275,46 @@ function passage(units, { entryId, part, offset, hash }, max, cursorAt) {
     }
   }
   return page;
+}
+
+// A navigation inventory, not an inference that these operations prove the anchor's claims.
+// Call IDs are the recorded join key; results can be missing, repeated, or occur after the anchor.
+function turnInventory(path, units, { anchor, entryId, part, hash, resumed }, max, cursorAt) {
+  const at = path.findIndex(e => e.id === anchor);
+  if (at < 0) fail(`entry ${anchor} is not on the selected branch`);
+  const isUser = e => e.type === 'message' && e.message.role === 'user';
+  let start = at;
+  while (start >= 0 && !isUser(path[start])) start--;
+  let end = at + 1;
+  while (end < path.length && !isUser(path[end])) end++;
+  const inside = new Set(path.slice(Math.max(0, start), end).map(e => e.id));
+  const items = units.filter(u => inside.has(u.id) && isToolPart(u.kind));
+  const turn = { anchor, promptEntryId: path[start]?.id ?? null, nextPromptEntryId: path[end]?.id ?? null, totalParts: items.length };
+  const fingerprint = digest(JSON.stringify([turn, items.map(u => [u.id, u.part, u.kind, u.tool, u.label, u.text, u.identity, u.at])]));
+  if (resumed && fingerprint !== hash) fail('turn activity changed since the cursor was issued');
+  const first = resumed ? items.findIndex(u => u.id === entryId && u.part === part) : 0;
+  if (first < 0) fail('turn continuation part not found');
+  let text = `Tool activity in user turn ${turn.promptEntryId ?? '(no recorded prompt)'}; next prompt ${turn.nextPromptEntryId ?? '(branch end)'}.\n`
+    + `Anchor ${anchor}. ${items.length} readable activity parts; call IDs link recorded calls/results, not proof of success.\n`
+    + 'Open any entryId/part with view:"entry". Nested tool results are not separate source entries.\n';
+  const activities = [];
+  for (let i = first; i < items.length; i++) {
+    const u = items[i];
+    const relation = u.index < path[at].index ? 'before' : u.index > path[at].index ? 'after' : 'at';
+    const callId = u.kind === 'tool_call' ? u.identity : u.kind === 'tool_result' ? u.identity?.[0] : undefined;
+    const compact = u.text.replace(/\s+/g, ' '), excerpt = compact.slice(0, 180);
+    const excerptTruncated = excerpt.length < compact.length;
+    const row = `${u.kind} ${u.label ?? ''} · ${relation} anchor · ${u.at ?? ''}${callId ? ` · call ${callId}` : ''}\n`
+      + `${JSON.stringify({ entryId: u.id, part: u.part, offset: 0 })} · ${u.text.length} chars\n${excerpt}${excerptTruncated ? ' …' : ''}\n`;
+    if (text.length + row.length > max) {
+      if (!activities.length) fail('maxChars is too small for a turn activity reference');
+      return { text, turn, activities, next: cursorAt(u, anchor, fingerprint) };
+    }
+    text += row;
+    activities.push({ entryId: u.id, part: u.part, kind: u.kind, tool: u.tool, callId: callId ?? null,
+      timestamp: u.at, relation, excerpt, totalChars: u.text.length, excerptTruncated });
+  }
+  return { text, turn, activities };
 }
 
 function outline(s, path, units, branchEnd, resume, max, cursorAt) {

@@ -5,6 +5,7 @@ import { join, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 import { searchParts, isToolPart, normalizeCwd } from './content.mjs';
 import { readLines } from './jsonl.mjs';
+import { nulMatchOffset } from './nul-preview.mjs';
 
 const hash = value => createHash('sha256').update(value).digest('hex');
 const iso = value => new Date(value).toISOString();
@@ -227,14 +228,30 @@ export class HistoryIndex {
     if (!Number.isInteger(limit) || limit < 1 || limit > 50) throw new Error('limit must be 1..50 per section');
     const scope = occurrenceScope(options);
     // Search dates refer to the evidence; browsing dates refer to a session's last activity.
-    const hasQuery = !!options.query?.trim(), tool = options.tool ?? null;
-    if (!hasQuery && (tool !== null || options.reasoning)) throw new Error('tool and reasoning:true require a nonblank query; omit them to browse sessions.');
+    const mode = options.mode ?? 'words';
+    if (mode !== 'words' && mode !== 'literal') throw new Error('mode must be words or literal');
+    const literal = mode === 'literal';
+    if (literal && options.anyOf !== undefined) throw new Error('anyOf is available only in words mode');
+    const clauses = options.query?.trim() ? [literal ? options.query : ftsQuery(options.query)] : [];
+    if (options.anyOf !== undefined) {
+      if (!Array.isArray(options.anyOf) || options.anyOf.length < 1 || options.anyOf.length > 12
+        || options.anyOf.some(q => typeof q !== 'string' || !q.trim())) {
+        throw new Error('anyOf must contain 1..12 nonblank query strings');
+      }
+      clauses.push('(' + options.anyOf.map(q => '(' + ftsQuery(q) + ')').join(' OR ') + ')');
+    }
+    const query = clauses.length ? clauses.join(' AND ') : null;
+    const hasQuery = query !== null, tool = options.tool ?? null, kind = options.kind;
+    if (kind !== undefined && !['user', 'assistant', 'summary', 'custom', 'tool_call', 'tool_result', 'shell'].includes(kind)) {
+      throw new Error('kind must be user, assistant, summary, custom, tool_call, tool_result, or shell');
+    }
+    if (!hasQuery && literal) throw new Error('literal mode requires a nonblank query');
+    if (!hasQuery && (tool !== null || options.reasoning || kind !== undefined)) throw new Error('tool, kind and reasoning:true require a nonblank query or anyOf; omit them to browse sessions.');
     const dateColumn = hasQuery ? 'd.timestamp' : 's.updated';
     const dateSql = [], dateArgs = [];
     if (options.since) { dateSql.push(`${dateColumn}>=?`); dateArgs.push(iso(options.since)); }
     if (options.until) { dateSql.push(`${dateColumn}<?`); dateArgs.push(iso(options.until)); }
-    const query = hasQuery ? ftsQuery(options.query) : null;
-    const fingerprint = hash(JSON.stringify([query, scope.sql, scope.args, dateSql, dateArgs, !!options.reasoning, tool]));
+    const fingerprint = hash(JSON.stringify([literal ? { literal: query } : query, scope.sql, scope.args, dateSql, dateArgs, !!options.reasoning, tool, ...(kind === undefined ? [] : [kind])]));
     // The revision, both ranked sections and the next cursor share this read transaction.
     // No result list or long-lived SQLite snapshot survives the request.
     const revision = this.sql.revision.get().value;
@@ -258,16 +275,18 @@ export class HistoryIndex {
       const filters = [...dateSql];
       if (!options.reasoning) filters.push("d.kind<>'reasoning'");
       if (tool !== null) filters.push('d.tool=?');
-      const args = [query, ...dateArgs, ...(tool !== null ? [tool] : []), ...scope.args];
+      if (kind !== undefined) filters.push('d.kind=?');
+      const args = [query, ...dateArgs, ...(tool !== null ? [tool] : []), ...(kind === undefined ? [] : [kind]), ...scope.args];
       const rows = this.db.prepare(`
         SELECT d.id,d.kind,d.tool,d.timestamp
-        FROM ${table} f JOIN doc d ON d.id=f.rowid
-        WHERE f.${table} MATCH ? ${filters.length ? 'AND ' + filters.join(' AND ') : ''}
+        FROM ${table} f ${literal ? 'CROSS JOIN' : 'JOIN'} doc d ON d.id=f.rowid
+        WHERE ${literal ? 'instr(f.text,?)>0' : `f.${table} MATCH ?`} ${filters.length ? 'AND ' + filters.join(' AND ') : ''}
           AND EXISTS(SELECT 1 FROM occurrence o JOIN session s ON s.id=o.session WHERE o.doc=d.id AND ${scope.sql})
-        ORDER BY f.rank,d.key LIMIT ? OFFSET ?
+        ORDER BY ${literal ? '' : 'f.rank,'}d.key LIMIT ? OFFSET ?
       `).all(...args, limit + 1, offsets[i]);
-      // Sort lightweight candidates; load complete text/snippets only for the displayed page.
-      const preview = this.db.prepare(`SELECT text source,
+      // Literal scans start from the text table: doc-key order would cause random text lookups.
+      // Load complete text/snippets only for the displayed page.
+      const preview = this.db.prepare(literal ? `SELECT text source FROM ${table} WHERE rowid=?` : `SELECT text source,
         snippet(${table},0,'[',']','…',32) excerpt, snippet(${table},0,'','',char(1),32) plain
         FROM ${table} WHERE rowid=? AND ${table} MATCH ?`);
       const occurrences = this.db.prepare(`
@@ -279,8 +298,10 @@ export class HistoryIndex {
       results[table === 'tool_io' ? 'tools' : 'conversation'] = {
         hits: rows.slice(0, limit).map(({id, ...row}) => {
           // FTS5 MATCH can ignore a REAL rowid constraint; bind the identifier as INTEGER.
-          const {source, plain, excerpt} = preview.get(BigInt(id), query);
-          return {...occurrences.get(id, ...scope.args), ...row, ...matchPreview(source, plain, excerpt),
+          const {source, plain, excerpt} = literal ? preview.get(BigInt(id)) : preview.get(BigInt(id), query);
+          const match = literal ? literalPreview(source, query)
+            : source.includes('\0') ? sourcePreview(source, nulMatchOffset(source, query)) : matchPreview(source, plain, excerpt);
+          return {...occurrences.get(id, ...scope.args), ...row, ...match,
             copies: copies.get(id, ...scope.args).n};
         }),
         more: rows.length > limit
@@ -290,6 +311,18 @@ export class HistoryIndex {
     const more = results.conversation.more || results.tools.more;
     return {...results, ...(more ? {next: cursorAt(...offsets)} : {}), ms: +(performance.now() - start).toFixed(1)};
   }
+}
+
+function literalPreview(source, query) {
+  const offset = source.indexOf(query);
+  if (offset < 0) throw new Error('Literal match is not an exact source substring');
+  return sourcePreview(source, offset);
+}
+
+function sourcePreview(source, offset) {
+  const from = Math.max(0, offset - 160), to = Math.min(source.length, from + 598);
+  return { offset, excerpt: (from ? '…' : '') + source.slice(from, to) + (to < source.length ? '…' : ''),
+    excerptTruncated: from > 0 || to < source.length };
 }
 
 function matchPreview(source, plain, marked) {
