@@ -3,6 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "description": "On-demand search and source-anchored reading of recorded Pi sessions.",
+  "license": "MIT",
   "type": "module",
   "keywords": ["pi-package"],
   "pi": { "extensions": ["./index.ts"] },
