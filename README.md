@@ -51,12 +51,15 @@ The tool filter matches the recorded name exactly.
   Readable reasoning is indexed but searched only with `reasoning: true`; image payloads and encrypted reasoning signatures are excluded.
 
 Word results use BM25 rank with a stable content-key tiebreaker.
-Literal results use content-key order only, with no relevance or recency preference, so hits beyond `limit` are not lower-ranked.
+Literal results have no relevance rank: they are ordered by evidence timestamp, newest first, with content-key order for ties.
+Copied fork evidence keeps its original timestamp.
+Hits beyond `limit` are older, not less relevant.
 Session listings use last activity followed by session ID.
 Model-facing text includes every returned hit or session, with hit previews of at most 600 characters.
 `limit` sets the hits per section, or sessions when browsing: five by default, up to fifty; larger limits produce longer responses.
 `more` marks a section or listing whose further results were omitted, shown as `+` after its count; raise `limit` or narrow the query, filters, or dates.
 Programmatic callers receive the same results through `structuredContent`.
+The declared output schemas omit refresh counters, timings, and read spans to keep tool declarations short; the values are still returned.
 
 ## Read
 

@@ -282,7 +282,7 @@ export class HistoryIndex {
         FROM ${from}
         WHERE ${literal ? 'instr(f.text,?)>0' : `f.${table} MATCH ?`} ${filters.length ? 'AND ' + filters.join(' AND ') : ''}
           AND ${inScope}
-        ORDER BY ${literal ? '' : 'f.rank,'}d.key LIMIT ?
+        ORDER BY ${literal ? 'd.timestamp DESC,' : 'f.rank,'}d.key LIMIT ?
       `).all(...args, limit + 1);
       // Load complete text/snippets only for the displayed page.
       const preview = this.db.prepare(literal ? `SELECT text source FROM ${table} WHERE rowid=?` : `SELECT text source,

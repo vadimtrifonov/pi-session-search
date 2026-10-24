@@ -11,7 +11,7 @@ const message = (id, text) => ({ type: 'message', id, parentId: null, timestamp,
   message: { role: 'assistant', content: [{ type: 'text', text }] } });
 const jsonl = rows => rows.map(e => JSON.stringify(e)).join('\n') + '\n';
 
-test('literal search preserves exact text, short strings, original offsets and word defaults', async t => {
+test('literal search preserves exact text, short strings, original offsets, newest-first order and word defaults', async t => {
   const base = mkdtempSync(join(tmpdir(), 'pi-history-literal-')), root = join(base, 'sessions');
   mkdirSync(root);
   const index = new HistoryIndex(join(base, 'index.db'));
@@ -83,9 +83,11 @@ test('literal search preserves exact text, short strings, original offsets and w
   const all = index.search(options);
   assert.equal(new Set(all.conversation.hits.map(h => h.entryId)).size, 2);
   assert.equal(all.conversation.more, false);
-  appendFileSync(join(root, 'origin.jsonl'), jsonl([message('append', 'getSessionDir appended')]));
+  // Newer evidence leads despite its later-sorting ID; equal timestamps keep key order.
+  appendFileSync(join(root, 'origin.jsonl'), jsonl([{ ...message('tail', 'getSessionDir appended'), timestamp: '2026-01-02T00:00:00.000Z' }]));
   await index.sync(root);
-  assert.equal(index.search(options).conversation.hits.length, 3);
+  assert.deepEqual(index.search(options).conversation.hits.map(h => h.entryId), ['tail', 'other', 'source']);
   for (const query of [undefined, '', ' \n\t']) assert.throws(() => index.search({ query, mode: 'literal' }), /nonblank query/);
   assert.throws(() => index.search({ query: 'x', mode: 'unknown' }), /mode must/);
 });
+
