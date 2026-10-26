@@ -100,6 +100,9 @@ test('Pi loader: schemas, rendered results, archive scope and no-UI lifecycle', 
       assert.equal(next.structuredContent.view, view);
     }
   }
+  const unsaved = await call('session_search', { query: 'archive needle', limit: 1 }, context('', 'unsaved'));
+  assert.equal(unsaved.structuredContent.sync.root, join(agentDir, 'sessions'));
+  assert.equal(unsaved.structuredContent.conversation.hits.length, 1);
   const own = await call('session_search', { query: 'archive needle', sessionId: 'self' });
   assert.equal(own.structuredContent.conversation.hits[0].sessionId, 'self');
   const typed = await call('session_search', { query: 'archive', kind: 'tool_call' });

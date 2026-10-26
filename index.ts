@@ -77,9 +77,10 @@ export default function (pi: ExtensionAPI) {
   function service(ctx: ExtensionContext) {
     const agentDir = resolve(getAgentDir());
     const defaultRoot = join(agentDir, 'sessions');
-    const sessionDir = resolve(ctx.sessionManager.getSessionDir());
+    const sessionDir = ctx.sessionManager.getSessionDir();
     // Direct children of the standard sessions root share that archive; other directories are roots.
-    const root = relative(defaultRoot, dirname(sessionDir)) === '' ? defaultRoot : sessionDir;
+    // An unsaved session (--no-session) has no directory and searches the standard archive.
+    const root = !sessionDir || relative(defaultRoot, dirname(resolve(sessionDir))) === '' ? defaultRoot : resolve(sessionDir);
     let instance = services.get(root);
     if (!instance) {
       const key = createHash('sha256').update(root).digest('hex').slice(0, 16);

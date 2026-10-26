@@ -118,6 +118,7 @@ Direct retrieval calls/results remain readable even though they are excluded fro
 
 A session directory directly under `<agent-dir>/sessions` uses that parent as the archive, across projects.
 Other session directories are searched as their own archives.
+An unsaved session (`--no-session`) has no directory and uses `<agent-dir>/sessions`.
 `sync.root` reports the effective scope; the extension does not infer a broader archive from an SDK-specific directory layout.
 The agent directory comes from Pi's CLI/environment configuration, normally `~/.pi/agent`.
 
