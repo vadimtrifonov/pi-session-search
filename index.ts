@@ -98,8 +98,8 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: 'session_search', label: 'Session Search',
     description: 'Excludes current session unless sessionId names it (environment variable PI_SESSION_ID). Without query or anyOf, lists sessions. since/until filter entry time, or last activity when listing.',
-    promptSnippet: 'Find prior investigations and decisions in recorded Pi sessions.',
-    promptGuidelines: ['When an answer depends on prior sessions or findings missing from current context, use session_search, then session_read on relevant hits.'],
+    promptSnippet: 'Find messages and tool activity across projects.',
+    promptGuidelines: ['Use session_search when needed Pi history is missing from current context; use session_read if hit previews are insufficient.'],
     parameters: Type.Object({
       query: Type.Optional(Type.String()),
       anyOf: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { minItems: 1, maxItems: 12, description: 'Words mode only; query, if given, must also match.' })),
