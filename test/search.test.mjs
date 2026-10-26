@@ -66,11 +66,35 @@ test('fork copies collapse without hiding divergent work or changing source scop
   const result=index.search({query:'shared needle'}).conversation.hits;
   assert.equal(result.length,1);assert.equal(result[0].copies,2);assert.equal(result[0].sessionId,'origin');
   assert.equal(index.search({query:'needle',session:'fork'}).conversation.hits.length,3);
+  for (const options of [{query:'needle',session:'missing'},{session:'missing'}]) assert.throws(()=>index.search(options),/Session missing is not indexed/);
   assert.equal(index.search({query:'shared',cwd:'c:/PROJECT/child/'}).conversation.hits[0].sessionId,'fork');
   assert.equal(index.search({query:'shared',cwd:'C:\\Project',descendants:true}).conversation.hits[0].copies,2);
   assert.equal(index.search({query:'shared',excludeSession:'origin'}).conversation.hits[0].sessionId,'fork');
   assert.equal(index.search({query:'shared',since:'2026-01-05'}).conversation.hits.length,0);
   assert.deepEqual(index.search({since:'2026-01-05'}).sessions.map(s=>s.sessionId),['fork']);
+});
+
+test('displayed times and bounds without an offset use local time, including a bare date', async t=>{
+  const {root,index}=setup(t);
+  // Each instant has different UTC and local dates in zones east (east) or west (west) of UTC.
+  const instants={east:'2026-01-01T13:30:00.000Z',west:'2026-01-02T02:00:00.000Z'};
+  for(const [word,at] of Object.entries(instants)) writeFileSync(join(root,word+'.jsonl'),jsonl([header(word),{...message(word,null,word),timestamp:at}]));
+  await index.sync(root);
+  const pad=n=>String(n).padStart(2,'0'), day=d=>d.getFullYear()+'-'+pad(d.getMonth()+1)+'-'+pad(d.getDate());
+  for(const [word,at] of Object.entries(instants)){
+    const hits=options=>index.search({query:word,...options}).conversation.hits.length;
+    const local=new Date(at), next=new Date(local.getFullYear(),local.getMonth(),local.getDate()+1);
+    assert.deepEqual([hits({since:day(local)}),hits({until:day(local)}),hits({until:day(next)})],[1,0,1],word);
+    // A displayed time shows the local date with its offset and works as a bound.
+    const shown=index.search({query:word}).conversation.hits[0].timestamp;
+    assert.match(shown,/^\d{4}-\d\d-\d\dT\d\d:\d\d[+-]\d\d:\d\d$/);
+    assert.equal(shown.slice(0,10),day(local));
+    assert.equal(Date.parse(shown),Date.parse(at));
+    assert.deepEqual([hits({since:shown}),hits({until:shown})],[1,0],word);
+  }
+  for(const s of index.search({}).sessions) for(const v of [s.started,s.updated]) assert.match(v,/[+-]\d\d:\d\d$/);
+  const hits=options=>index.search({query:'east',...options}).conversation.hits.length;
+  assert.deepEqual([hits({since:'2026-01-02T00:30:00+11:00'}),hits({since:'2026-01-02T00:30:00.001+11:00'})],[1,0]);
 });
 
 test('sync handles appends, rewrites, renames and incomplete or failed files transactionally', async t=>{
@@ -280,6 +304,14 @@ test('query and content boundaries: complete text, typed evidence, no opaque dat
   assert.equal(index.search({query:'reasononly'}).conversation.hits.length,0);
   assert.equal(index.search({query:'reasononly',reasoning:true}).conversation.hits.length,1);
   assert.equal(index.search({query:'echo'}).tools.hits.length,0);
+  const script={type:'message',id:'script',parentId:'a',timestamp,message:{role:'toolResult',toolCallId:'run',toolName:'codemode',content:[{type:'text',text:'cleantree'}],nestedCalls:{complete:true,calls:[
+    {id:'run|1',name:'bash',arguments:{command:'git status --porcelain'}},{id:'run|2',name:'session_search',arguments:{query:'selfquery'}}]}}};
+  appendFileSync(join(root,'a.jsonl'),jsonl([script]));await index.sync(root);
+  const nested=index.search({query:'porcelain',tool:'bash',kind:'tool_call'}).tools.hits;
+  assert.deepEqual(nested.map(h=>[h.entryId,h.part]),[['script','/message/nestedCalls/calls/0/arguments']]);
+  assert.equal(index.search({query:'cleantree',tool:'codemode'}).tools.hits.length,1);
+  assert.equal(index.search({query:'cleantree',tool:'bash'}).tools.hits.length,0);
+  assert.equal(index.search({query:'selfquery'}).tools.hits.length,0);
   assert.equal(ftsQuery('needle OR absent'),'"needle" AND "OR" AND "absent"');
   assert.throws(()=>ftsQuery('"unclosed'),/Unclosed/);
 });

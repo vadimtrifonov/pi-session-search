@@ -3,12 +3,14 @@ import { readdirSync, statSync } from 'node:fs';
 import { open } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
-import { searchParts, isToolPart, normalizeCwd } from './content.mjs';
+import { searchParts, isToolPart, localTime, normalizeCwd } from './content.mjs';
 import { readLines } from './jsonl.mjs';
 import { nulMatchOffset } from './nul-preview.mjs';
 
 const hash = value => createHash('sha256').update(value).digest('hex');
 const iso = value => new Date(value).toISOString();
+// A bound without an offset is local time, including a bare date, which JavaScript alone reads as UTC.
+const bound = value => iso(/^\d{4}-\d{2}-\d{2}$/.test(value) ? `${value}T00:00` : value);
 
 function discover(root) {
   const files = [], errors = [];
@@ -46,7 +48,7 @@ export class HistoryIndex {
       }
       this.db.exec('PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;');
       const version = this.db.prepare('PRAGMA user_version').get().user_version;
-      if (version !== 0 && version !== 1) throw new Error('Index schema changed; rebuild this disposable cache.');
+      if (version !== 0 && version !== 1) throw new Error(`Index schema changed; remove the disposable cache ${path} to rebuild it.`);
       if (version === 0) this.db.exec(`
         CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
         CREATE TABLE IF NOT EXISTS session(
@@ -232,6 +234,7 @@ export class HistoryIndex {
     const limit = options.limit ?? 5;
     if (!Number.isInteger(limit) || limit < 1 || limit > 50) throw new Error('limit must be 1..50 per section');
     const scope = occurrenceScope(options);
+    if (options.session && !this.db.prepare('SELECT 1 FROM session WHERE id=?').get(options.session)) throw new Error(`Session ${options.session} is not indexed.`);
     // Search dates refer to the evidence; browsing dates refer to a session's last activity.
     const mode = options.mode ?? 'words';
     if (mode !== 'words' && mode !== 'literal') throw new Error('mode must be words or literal');
@@ -254,13 +257,13 @@ export class HistoryIndex {
     if (!hasQuery && (tool !== null || options.reasoning || kind !== undefined)) throw new Error('tool, kind and reasoning:true require a nonblank query or anyOf; omit them to browse sessions.');
     const dateColumn = hasQuery ? 'd.timestamp' : 's.updated';
     const dateSql = [], dateArgs = [];
-    if (options.since) { dateSql.push(`${dateColumn}>=?`); dateArgs.push(iso(options.since)); }
-    if (options.until) { dateSql.push(`${dateColumn}<?`); dateArgs.push(iso(options.until)); }
+    if (options.since) { dateSql.push(`${dateColumn}>=?`); dateArgs.push(bound(options.since)); }
+    if (options.until) { dateSql.push(`${dateColumn}<?`); dateArgs.push(bound(options.until)); }
     // Both sections, hit owners and copy counts come from one read transaction, consistent under a concurrent sync.
     if (!hasQuery) {
       const filter = [scope.sql, ...dateSql].join(' AND ');
       const rows = this.db.prepare(`SELECT s.id sessionId,s.path sessionFile,s.cwd,s.name,s.started,s.updated FROM session s WHERE ${filter} ORDER BY s.updated DESC,s.id LIMIT ?`).all(...scope.args, ...dateArgs, limit + 1);
-      return {sessions: rows.slice(0, limit), more: rows.length > limit, ms: +(performance.now() - start).toFixed(1)};
+      return {sessions: rows.slice(0, limit).map(r => ({...r, started: localTime(r.started), updated: localTime(r.updated)})), more: rows.length > limit, ms: +(performance.now() - start).toFixed(1)};
     }
     const results = {};
     const scopedLiteral = literal && !!options.session;
@@ -300,7 +303,7 @@ export class HistoryIndex {
           const {source, plain, excerpt} = literal ? preview.get(BigInt(id)) : preview.get(BigInt(id), query);
           const match = literal ? literalPreview(source, query)
             : source.includes('\0') ? sourcePreview(source, nulMatchOffset(source, query)) : matchPreview(source, plain, excerpt);
-          return {...occurrences.get(id, ...scope.args), ...row, ...match,
+          return {...occurrences.get(id, ...scope.args), ...row, timestamp: localTime(row.timestamp), ...match,
             copies: copies.get(id, ...scope.args).n};
         }),
         more: rows.length > limit

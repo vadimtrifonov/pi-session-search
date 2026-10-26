@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { dirname, join, relative, resolve } from 'node:path';
+import { StringEnum } from '@earendil-works/pi-ai';
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { Type, type Static } from 'typebox';
 import { SessionService } from './src/service.mjs';
@@ -95,22 +96,22 @@ export default function (pi: ExtensionAPI) {
 
   pi.registerTool({
     name: 'session_search', label: 'Session Search',
-    description: 'Search recorded Pi sessions across projects, excluding the current session unless sessionId names it. Without query or anyOf, list recent sessions.',
+    description: 'Excludes current session unless sessionId names it (environment variable PI_SESSION_ID). Without query or anyOf, lists sessions. since/until filter entry time, or last activity when listing.',
     promptSnippet: 'Find prior investigations and decisions in recorded Pi sessions.',
-    promptGuidelines: ['When an answer depends on prior sessions or findings missing from current context, use session_search, then session_read on relevant source hits.'],
+    promptGuidelines: ['When an answer depends on prior sessions or findings missing from current context, use session_search, then session_read on relevant hits.'],
     parameters: Type.Object({
-      query: Type.Optional(Type.String({ description: 'Words mode: all words and "quoted phrases" must occur in the same text part; OR is an ordinary word.' })),
-      anyOf: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { minItems: 1, maxItems: 12, description: 'Alternative words-mode queries; a hit matches at least one, and query if given.' })),
-      mode: Type.Optional(Type.Union([Type.Literal('words'), Type.Literal('literal')], { description: 'words (default): whole tokens. literal: exact case-sensitive substring, for partial identifiers, paths or punctuation; newest first.' })),
-      cwd: Type.Optional(Type.String({ description: 'Exact recorded working directory.' })),
+      query: Type.Optional(Type.String()),
+      anyOf: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { minItems: 1, maxItems: 12, description: 'Words mode only; query, if given, must also match.' })),
+      mode: Type.Optional(StringEnum(['words', 'literal'] as const, { description: 'words (default): every whole word and "quoted phrase" must match in one part. literal: case-sensitive substring, newest first.' })),
+      cwd: Type.Optional(Type.String({ description: 'Exact directory match.' })),
       descendants: Type.Optional(Type.Boolean({ description: 'Include cwd subdirectories.' })),
-      sessionId: Type.Optional(Type.String({ description: 'Search only this session.' })),
-      since: Type.Optional(Type.String({ description: 'Inclusive ISO date/time of the evidence, or of last activity when browsing.' })),
-      until: Type.Optional(Type.String({ description: 'Exclusive ISO date/time; same target as since.' })),
-      reasoning: Type.Optional(Type.Boolean({ description: 'Also search recorded reasoning.' })),
-      tool: Type.Optional(Type.String({ description: 'Exact recorded tool name.' })),
-      kind: Type.Optional(Type.Union(['user', 'assistant', 'summary', 'custom', 'tool_call', 'tool_result', 'shell'].map(v => Type.Literal(v)), { description: 'shell: user shell commands and output, not agent tool calls.' })),
-      limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50, description: 'Hits per section, or sessions when browsing; default 5.' }))
+      sessionId: Type.Optional(Type.String()),
+      since: Type.Optional(Type.String({ description: 'ISO date/datetime; local unless offset given.' })),
+      until: Type.Optional(Type.String({ description: 'Exclusive.' })),
+      reasoning: Type.Optional(Type.Boolean({ description: 'Also search reasoning.' })),
+      tool: Type.Optional(Type.String({ description: 'Exact name. Calls inside codemode match their own names; their output matches codemode.' })),
+      kind: Type.Optional(StringEnum(['user', 'assistant', 'summary', 'custom', 'tool_call', 'tool_result', 'shell'] as const, { description: 'shell: user-run commands and output.' })),
+      limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50 }))
     }),
     outputSchema: SearchOutput,
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
@@ -127,17 +128,16 @@ export default function (pi: ExtensionAPI) {
 
   pi.registerTool({
     name: 'session_read', label: 'Session Read',
-    description: 'Read one branch of a recorded Pi session. To read around a search hit, pass its sessionId, entryId, part and offset.',
-    promptSnippet: 'Read recorded Pi session history.',
+    description: 'Reads one branch.',
     parameters: Type.Object({
       sessionId: Type.String(),
-      view: Type.Optional(Type.Union(['outline', 'passage', 'entry', 'conversation', 'turn'].map(v => Type.Literal(v)), { description: 'passage (default with entryId): history around and after the selected part; other tool output is clipped. outline (default without entryId): user prompts and summaries. entry: only this entry, unclipped. conversation: user and assistant text only. turn: tool and shell activity in the user turn containing entryId; no part or offset.' })),
+      view: Type.Optional(StringEnum(['outline', 'passage', 'entry', 'conversation', 'turn'] as const, { description: 'conversation: user/assistant text only. turn: tool/shell activity in user turn containing entryId; omit part/offset.' })),
       entryId: Type.Optional(Type.String()),
       part: Type.Optional(Type.String()),
       offset: Type.Optional(Type.Integer({ minimum: 0 })),
-      branchEnd: Type.Optional(Type.String({ description: 'Branch endpoint; default: newest descendant of entryId, or newest entry without one.' })),
-      cursor: Type.Optional(Type.String({ description: 'next from a previous read. Continues the same view and branch; omit other selection fields.' })),
-      maxChars: Type.Optional(Type.Integer({ minimum: 2000, maximum: 12000, description: 'Character budget; default 12000.' }))
+      branchEnd: Type.Optional(Type.String({ description: 'Default: newest descendant of entryId, or entryId itself if none; without entryId, newest entry.' })),
+      cursor: Type.Optional(Type.String({ description: 'Overrides entryId, part, offset and branchEnd.' })),
+      maxChars: Type.Optional(Type.Integer({ minimum: 2000, maximum: 12000 }))
     }),
     outputSchema: ReadOutput,
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },

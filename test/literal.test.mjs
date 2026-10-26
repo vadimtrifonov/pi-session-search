@@ -73,10 +73,8 @@ test('literal search preserves exact text, short strings, original offsets, newe
   }
   assert.deepEqual(stable(index.search({ ...options, session: 'fork', cwd: 'C:\\Project', descendants: true })),
     stable(index.search({ ...options, session: 'fork' })));
-  for (const scope of [{ session: 'missing' }, { session: 'fork', cwd: 'c:/project' }]) {
-    assert.deepEqual(stable(index.search({ ...options, ...scope })),
-      { conversation: { hits: [], more: false }, tools: { hits: [], more: false } });
-  }
+  assert.deepEqual(stable(index.search({ ...options, session: 'fork', cwd: 'c:/project' })),
+    { conversation: { hits: [], more: false }, tools: { hits: [], more: false } });
   const first = index.search({ ...options, limit: 1 });
   assert.equal(first.conversation.hits.length, 1);
   assert.equal(first.conversation.more, true);

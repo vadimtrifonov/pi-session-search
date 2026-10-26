@@ -165,7 +165,15 @@ test('raw history shows retrieval and direct shell use; reasoning only when addr
   assert.match(b, /--- tool_call session_search i\nquery: needle\n--- tool_result session_search j\nrecalled needle\n/);
   assert.match(b, /--- shell command k\necho hi\n--- shell output k\nhi\n$/);
   assert.doesNotMatch((await readSession(file, { entryId: 'b' })).text, /hmm/);
+  for (const view of ['passage', 'entry', 'conversation']) assert.match((await readSession(file, { entryId: 'b', view })).text, /--- assistant b · reasoning in \/message\/content\/0\/thinking[ \n]/);
   assert.match((await readSession(file, { entryId: 'b', part: '/message/content/0/thinking' })).text, /--- reasoning b\nhmm\n/);
+  const script = msg('s', 'k', 12, { role: 'toolResult', toolCallId: 'run', toolName: 'codemode', content: [],
+    nestedCalls: { complete: true, calls: [{ id: 'run|1', name: 'bash', arguments: { command: 'git status' } }] } });
+  const scripted = write('script.jsonl', jsonl([...records, script]));
+  const turn = await readSession(scripted, { entryId: 's', view: 'turn' });
+  assert.deepEqual(turn.activities.filter(a => a.entryId === 's').map(a => [a.kind, a.tool, a.part]),
+    [['tool_call', 'bash', '/message/nestedCalls/calls/0/arguments'], ['tool_result', 'codemode', '/message/content']]);
+  assert.match((await readSession(scripted, { entryId: 's', part: '/message/nestedCalls/calls/0/arguments', view: 'entry' })).text, /--- tool_call bash s · \S+ · \/message\/nestedCalls\/calls\/0\/arguments\ncommand: git status\n/);
   const interrupted = structuredClone(records);
   Object.assign(interrupted.at(-1).message, { command: 'inspect --verbose', output: 'partial output', exitCode: 130, cancelled: true, truncated: true });
   const stopped = await readSession(write('interrupted.jsonl', jsonl(interrupted)), { entryId: 'k' });

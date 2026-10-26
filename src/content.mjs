@@ -1,4 +1,14 @@
 // Searchable parts of recorded Pi entries. Source graph and opaque payloads stay outside FTS.
+const pad = n => String(n).padStart(2, '0');
+
+// A recorded instant on this computer's clock with its UTC offset, to the minute: the clock that
+// since/until bounds without an offset use, and a valid bound itself.
+export function localTime(at) {
+  const d = new Date(at), offset = -d.getTimezoneOffset(), abs = Math.abs(offset);
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
+    + `${offset < 0 ? '-' : '+'}${pad(Math.floor(abs / 60))}:${pad(abs % 60)}`;
+}
+
 const retrievalTools = new Set(['session_search', 'session_read', 'recall']);
 
 function argumentText(value) {
@@ -35,6 +45,8 @@ export function sourceParts(entry) {
         }
       });
     } else if (m.role === 'toolResult') {
+      // A script tool records the calls it made on its result; their outputs exist only in its content.
+      m.nestedCalls?.calls?.forEach((c, i) => add(`/message/nestedCalls/calls/${i}/arguments`, 'tool_call', argumentText(c.arguments), c.name, c.id));
       textParts(m.content, '/message/content', 'tool_result', m.toolName, [m.toolCallId, !!m.isError]);
     } else if (m.role === 'user' || m.role === 'custom') {
       textParts(m.content, '/message/content', m.role, null, m.customType ?? null);

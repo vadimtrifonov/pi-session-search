@@ -20,6 +20,7 @@ pi install git:github.com/vadimtrifonov/pi-session-search
 Each hit includes `sessionId`, `entryId`, `part`, and `offset` for a follow-up `session_read`.
 `tool`, `kind`, and `reasoning: true` require a nonblank `query` or `anyOf`; session listings reject them.
 The tool filter matches the recorded name exactly.
+Calls made inside a script tool such as codemode are searchable under their own names, but their output belongs to the script's result and matches only the script tool's name.
 
 - In the default `mode: "words"`, all query tokens and quoted token phrases must match within one searchable part, not across separate blocks of a message or elsewhere in the session.
   `anyOf` supplies 1–12 alternative queries, each with the same all-terms semantics.
@@ -39,9 +40,12 @@ The tool filter matches the recorded name exactly.
   This mode scans the existing indexed text and adds no index or storage requirement; short queries can match many parts.
 - `cwd` filters the recorded working directory, with optional descendants.
   Date filters apply to evidence timestamps when searching and last activity when browsing.
+  A bound is a date (`YYYY-MM-DD`) or an ISO date-time; without an offset it is host-local time, so a bare date means local midnight.
+  Results show times on the same host-local clock with their UTC offset, to the minute (`2026-10-19T14:43+11:00`); a shown time works as a bound at that precision.
 - `kind` restricts results to `user`, `assistant`, `summary`, `custom`, `tool_call`, `tool_result`, or `shell`.
   It selects provenance before ranking; a source kind does not establish whether the statement is true.
 - The calling session is excluded unless `sessionId` is explicitly supplied.
+  A `sessionId` that is not in the index is an error, not an empty result.
   Historical branches remain searchable.
 - Exact copied fork evidence is returned once, after applying occurrence filters.
   Copy counts describe matching session copies, not independent corroboration.
@@ -88,19 +92,19 @@ The preview does not advance pagination.
 
 - `entry` reads only `entryId`, without adjacent history or a later-response preview.
   All readable parts are available in full, with continuation inside oversized parts.
-  Reasoning is shown only when its exact `part` is addressed.
+  Reasoning is shown only when its exact `part` is addressed; the header of assistant text names those parts.
 - `conversation` pages through user and assistant text on the selected ancestry, from `entryId` or the first conversation entry.
   Tools, summaries, custom messages, and reasoning are omitted: this is a conversation projection, not complete evidence.
   A supplied entry must contain conversation text; use `view: "entry"` to open a summary or tool entry.
 - `turn` requires `entryId` and lists calls, results, and direct shell activity in its containing user turn.
   It includes prompt boundaries, source-part references, recorded call IDs, and whether each activity occurred before, at, or after the anchor.
   Matching call IDs are navigation aids, not proof that a claim was verified; results can be missing, repeated, or later than the claim.
-  Nested calls do not have independent source-result entries.
+  Calls made inside a script are listed from the script's result entry; their outputs exist only in that result.
   Empty calls/results are represented by labelled placeholders.
   Open listed references with `view: "entry"`.
 
 Read results include the source file path.
-Entry and conversation headings include the original entry timestamp and source-part pointer for citations without JSONL extraction.
+Entry and conversation headings include the entry time and source-part pointer for citations without JSONL extraction.
 Use `session_search` with `sessionId` for further matches in a known session.
 The investigation views do not add a second matching engine or generate summaries.
 
@@ -145,5 +149,5 @@ Run the Pi loader integration check separately:
 npm run test:integration
 ```
 
-This check requires the declared Pi and TypeBox peers to be locally resolvable and fails if they are missing.
+This check requires the declared Pi, Pi AI and TypeBox peers to be locally resolvable and fails if they are missing.
 Node's test runner does not use Pi's host-module mapping.

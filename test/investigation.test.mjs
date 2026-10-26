@@ -4,6 +4,7 @@ import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { readSession } from '../src/read.mjs';
+import { localTime } from '../src/content.mjs';
 
 const text = text => ({ type: 'text', text });
 const call = (id, command) => ({ type: 'toolCall', id, name: 'bash', arguments: { command } });
@@ -52,7 +53,7 @@ test('entry view reads all parts without adjacent-history or preview overhead', 
   assert.equal(end, 'details '.repeat(700).length);
   assert.match(textSeen, /PASS first/);
   assert.doesNotMatch(textSeen, /alleged fix|The fix is verified|LATER/);
-  assert.match(textSeen, /2026-10-01T12:00:00Z · \/message\/content\/1\/text/);
+  assert.ok(textSeen.includes(`${localTime('2026-10-01T12:00:00Z')} · /message/content/1/text`));
   const hidden = setup(t, [records[0], message('reasoning-only', null, 'assistant', [{ type: 'thinking', thinking: 'hidden thought' }])]);
   await assert.rejects(() => readSession(hidden.file, { view: 'entry', entryId: 'reasoning-only' }), /no readable text/);
   assert.match((await readSession(hidden.file, { view: 'entry', entryId: 'reasoning-only', part: '/message/content/0/thinking' })).text, /hidden thought/);

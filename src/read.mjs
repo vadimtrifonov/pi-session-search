@@ -2,7 +2,7 @@
 // ancestry that continues inside oversized parts. Parts, pointers and text come from content.mjs.
 import { open } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
-import { isToolPart, sourceParts } from './content.mjs';
+import { isToolPart, localTime, sourceParts } from './content.mjs';
 import { readLines } from './jsonl.mjs';
 
 const VIEWS = new Set(['outline', 'passage', 'entry', 'conversation', 'turn']);
@@ -11,7 +11,7 @@ const CLIP = 600; // characters shown of tool I/O, summaries and custom messages
 const FULL = new Set(['user', 'assistant']);
 
 const fail = message => { throw new Error(message); };
-const stamp = at => (at ? `${at.slice(0, 16).replace('T', ' ')}Z` : '');
+const stamp = at => (at ? localTime(at) : '');
 const digest = text => createHash('sha256').update(text).digest('hex').slice(0, 16);
 const need = (s, id) => s.byId.get(id) ?? fail(`entry ${id} not found`);
 
@@ -81,10 +81,13 @@ function unitsOf(e) {
     });
     parts.sort((a, b) => Number(a.part.split('/')[3]) - Number(b.part.split('/')[3]));
   }
-  if (m?.role === 'toolResult' && !parts.length) {
+  if (m?.role === 'toolResult' && !parts.some(p => p.kind === 'tool_result')) {
     parts.push({ part: '/message/content', kind: 'tool_result', text: '[no readable output]', tool: m.toolName, identity: [m.toolCallId, !!m.isError] });
   }
-  return parts.map(p => ({ ...p, id: e.id, at: e.timestamp, index: e.index, label: labelOf(e, p) }));
+  // Reasoning is read only by selecting its part, so assistant text names where it is.
+  const reasoning = parts.filter(p => p.kind === 'reasoning').map(p => p.part);
+  return parts.map(p => ({ ...p, id: e.id, at: e.timestamp, index: e.index, label: labelOf(e, p),
+    ...(p.kind === 'assistant' && reasoning.length ? { reasoning } : {}) }));
 }
 
 function labelOf(e, p) {
@@ -101,7 +104,8 @@ function labelOf(e, p) {
 
 function head(u, from, provenance = false) {
   let h = `--- ${u.kind}${u.label ? ` ${u.label}` : ''} ${u.id}`;
-  if (u.kind === 'user' || provenance) h += ` · ${provenance ? u.at ?? '' : stamp(u.at)}`;
+  if (u.reasoning) h += ` \u00b7 reasoning in ${u.reasoning.join(', ')}`;
+  if (u.kind === 'user' || provenance) h += ` · ${stamp(u.at)}`;
   if (provenance) h += ` · ${u.part}`;
   if (from) h += ` · from char ${from} of ${u.text.length}`;
   return h + '\n';
@@ -300,7 +304,7 @@ function turnInventory(path, units, { anchor, entryId, part, hash, resumed }, ma
     const callId = u.kind === 'tool_call' ? u.identity : u.kind === 'tool_result' ? u.identity?.[0] : undefined;
     const compact = u.text.replace(/\s+/g, ' '), excerpt = compact.slice(0, 180);
     const excerptTruncated = excerpt.length < compact.length;
-    const row = `${u.kind} ${u.label ?? ''} · ${relation} anchor · ${u.at ?? ''}${callId ? ` · call ${callId}` : ''}\n`
+    const row = `${u.kind} ${u.label ?? ''} · ${relation} anchor · ${stamp(u.at)}${callId ? ` · call ${callId}` : ''}\n`
       + `${JSON.stringify({ entryId: u.id, part: u.part, offset: 0 })} · ${u.text.length} chars\n${excerpt}${excerptTruncated ? ' …' : ''}\n`;
     if (text.length + row.length > max) {
       if (!activities.length) fail('maxChars is too small for a turn activity reference');
@@ -308,7 +312,7 @@ function turnInventory(path, units, { anchor, entryId, part, hash, resumed }, ma
     }
     text += row;
     activities.push({ entryId: u.id, part: u.part, kind: u.kind, tool: u.tool, callId: callId ?? null,
-      timestamp: u.at, relation, excerpt, totalChars: u.text.length, excerptTruncated });
+      timestamp: stamp(u.at), relation, excerpt, totalChars: u.text.length, excerptTruncated });
   }
   return { text, turn, activities };
 }
