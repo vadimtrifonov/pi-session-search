@@ -31,15 +31,13 @@ function setup(t) {
 }
 
 test('lazy worker service serializes jobs, refreshes searches, and continues source reads', async t => {
-  const { service, root, db, file } = setup(t);
+  const { service, db, file } = setup(t);
   assert.equal(existsSync(db), false); // constructing an extension service does no I/O
   const [search, outline] = await Promise.all([
     service.search({ query: 'needle evidence' }),
     service.read({ sessionId: 'session-a' })
   ]);
-  assert.equal(search.sync.refreshed, true);
   assert.equal(search.sync.complete, true);
-  assert.deepEqual(outline.sync, { root, refreshed: false });
   assert.match(outline.text, /What did the investigation find/);
   const hit = search.tools.hits[0];
   assert.equal(hit.entryId, 'output');
@@ -70,10 +68,8 @@ test('source reads do not refresh the index; the next search does', async t => {
   appendFileSync(file, jsonl([message('newfact', 'fact5', 'assistant', text('needle appended evidence'))]));
   const source = await service.read({ sessionId: 'session-a', entryId: 'newfact', maxChars: 2000 });
   assert.match(source.text, /needle appended evidence/);
-  assert.deepEqual(source.sync, { root, refreshed: false });
 
   const fresh = await service.search({ query: 'appended evidence' });
-  assert.equal(fresh.sync.refreshed, true);
   assert.equal(fresh.sync.appended, 1);
   assert.equal(fresh.conversation.hits[0].entryId, 'newfact');
   const all = await service.search({ ...query, limit: 10 });
@@ -81,7 +77,6 @@ test('source reads do not refresh the index; the next search does', async t => {
   assert.deepEqual(all.conversation.hits.map(h => h.entryId).sort(), [...facts.map(e => e.id), 'newfact'].sort());
 
   const browse = await service.search({ limit: 1 });
-  assert.equal(browse.sync.refreshed, true);
   assert.equal(browse.more, true);
   const listing = await service.search({ limit: 3 });
   assert.deepEqual(listing.sessions.map(s => s.sessionId), ['session-a', 'session-b', 'session-c']);

@@ -63,7 +63,6 @@ test('Pi loader: schemas, rendered results, archive scope and no-UI lifecycle', 
 
   const found = await call('session_search', { query: 'archive needle', limit: 50 });
   assert.equal(found.structuredContent.sync.root, join(agentDir, 'sessions'));
-  assert.equal(found.structuredContent.sync.refreshed, true);
   assert.equal(found.structuredContent.sync.complete, false);
   assert.equal(found.structuredContent.sync.errors.length, 1);
   assert.match(found.content[0].text, /Index refresh incomplete/);
@@ -87,8 +86,6 @@ test('Pi loader: schemas, rendered results, archive scope and no-UI lifecycle', 
   const { sessionId, entryId, part, offset } = found.structuredContent.conversation.hits[0];
   const read = await call('session_read', { sessionId, entryId, part, offset, maxChars: 2000 });
   assert.match(read.structuredContent.text, /archive needle/);
-  assert.equal(read.structuredContent.sync.refreshed, false);
-  assert.match(read.content[0].text, /index not refreshed/);
   assert.doesNotMatch(read.content[0].text, /Index refresh incomplete/);
   for (const view of ['outline', 'entry', 'conversation', 'turn']) {
     const result = await call('session_read', { sessionId, view, ...(view === 'outline' ? {} : { entryId }), maxChars: 2000 });

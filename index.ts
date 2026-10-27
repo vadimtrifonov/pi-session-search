@@ -5,9 +5,7 @@ import { getAgentDir, type ExtensionAPI, type ExtensionContext } from '@earendil
 import { Type, type Static } from 'typebox';
 import { SessionService } from './src/service.mjs';
 
-type SyncStatus =
-  | { root: string; refreshed: false }
-  | { root: string; refreshed: true; files: number; pendingBytes: number; complete: boolean; errors: { path: string; error: string }[] };
+type SyncStatus = { root: string; files: number; pendingBytes: number; complete: boolean; errors: { path: string; error: string }[] };
 
 // Declared outputs are rendered into codemode prompts, so they list only fields that scripts act on.
 // Results also carry refresh counters, timings, and read spans.
@@ -43,11 +41,9 @@ const ReadOutput = Type.Object({
 
 const oneLine = (value: string, max = 600) => value.replace(/\s+/g, ' ').slice(0, max);
 function indexStatus(sync: SyncStatus) {
-  const scope = `Archive: ${oneLine(sync.root, 240)} · `;
-  if (!sync.refreshed) return scope + 'index not refreshed\n';
-  const refreshed = scope + `${sync.files} files\n`;
-  if (sync.complete) return refreshed;
-  return refreshed + `Index refresh incomplete: ${sync.errors.length} error(s), ${sync.pendingBytes} pending bytes. Cached results may be stale or incomplete.\n`
+  const status = `Archive: ${oneLine(sync.root, 240)} · ${sync.files} files\n`;
+  if (sync.complete) return status;
+  return status + `Index refresh incomplete: ${sync.errors.length} error(s), ${sync.pendingBytes} pending bytes. Cached results may be stale or incomplete.\n`
     + sync.errors.slice(0, 3).map(e => `${oneLine(e.path, 200)}: ${oneLine(e.error, 200)}\n`).join('');
 }
 
@@ -147,8 +143,8 @@ export default function (pi: ExtensionAPI) {
       if (!params.entryId && !params.cursor && (params.part !== undefined || params.offset !== undefined)) {
         throw new Error('part and offset require entryId or a continuation cursor');
       }
-      const result = await service(ctx).read(params, signal) as Static<typeof ReadOutput> & { sync: SyncStatus };
-      const text = indexStatus(result.sync) + `session ${result.sessionId} · branch end ${result.branchEnd} · view ${result.view}\nSource: ${result.sessionFile}\n`
+      const result = await service(ctx).read(params, signal) as Static<typeof ReadOutput>;
+      const text = `session ${result.sessionId} · branch end ${result.branchEnd} · view ${result.view}\nSource: ${result.sessionFile}\n`
         + result.text + (result.next ? `\nContinue: ${JSON.stringify({ sessionId: result.sessionId, cursor: result.next })}` : '');
       return { content: [{ type: 'text', text }], structuredContent: result, details: undefined };
     }

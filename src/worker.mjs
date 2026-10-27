@@ -11,13 +11,13 @@ try {
   index = new HistoryIndex(db);
   let result;
   if (operation === 'search') {
-    const sync = { ...await index.sync(root), root, refreshed: true };
+    const sync = { ...await index.sync(root), root };
     result = { ...index.search(options), sync };
   } else if (operation === 'read') {
     index.checkRoot(root);
     const { sessionId, ...readOptions } = options;
     const file = index.getSessionFile(sessionId);
-    result = { ...await readSession(file, readOptions), sessionFile: file, sync: { root, refreshed: false } };
+    result = { ...await readSession(file, readOptions), sessionFile: file };
     if (result.sessionId !== sessionId) throw new Error(`Session file changed identity: expected ${sessionId}, found ${result.sessionId}`);
   } else {
     throw new Error(`Unknown session history operation: ${operation}`);
