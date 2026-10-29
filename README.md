@@ -97,8 +97,8 @@ The full definitions of both tools are in [index.ts](index.ts).
 
 | When | Tokens added (Pi 1.4.0, Claude Opus 5.5) |
 | --- | --- |
-| Every request (tool definitions and guideline) | about 950 |
-| Every request, with codemode in its default mode | about 1,400 |
+| Every request, without codemode | about 960 |
+| Every request, with codemode | about 1,430 |
 | Each default search | about 2,000 |
 | Each search at the 50-hit maximum | about 20,000 |
 | Each full read page (12,000 characters) | about 5,000 |

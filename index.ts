@@ -91,11 +91,14 @@ export default function (pi: ExtensionAPI) {
     await Promise.all(closing.map(s => s.close()));
   });
 
+  // Groups both tools under one heading, with their own share of codemode's tool-list budget.
+  const namespace = { name: 'session_history' };
+
   pi.registerTool({
-    name: 'session_search', label: 'Session Search',
+    name: 'session_search', label: 'Session Search', namespace,
     description: 'Excludes current session unless sessionId names it (environment variable PI_SESSION_ID). Without query or anyOf, lists sessions. since/until filter entry time, or last activity when listing.',
-    promptSnippet: 'Find messages and tool activity across projects.',
-    promptGuidelines: ['Use session_search when needed Pi history is missing from current context; use session_read if hit previews are insufficient.'],
+    promptSnippet: 'Find past Pi sessions or matching excerpts.',
+    promptGuidelines: ['Use session_search when needed information is missing from context but may be in past Pi sessions.'],
     parameters: Type.Object({
       query: Type.Optional(Type.String()),
       anyOf: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { minItems: 1, maxItems: 12, description: 'Words mode only; query, if given, must also match.' })),
@@ -124,8 +127,9 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerTool({
-    name: 'session_read', label: 'Session Read',
+    name: 'session_read', label: 'Session Read', namespace,
     description: 'Reads one branch.',
+    promptSnippet: 'Read one session around a match, or browse its contents.',
     parameters: Type.Object({
       sessionId: Type.String(),
       view: Type.Optional(StringEnum(['outline', 'passage', 'entry', 'conversation', 'turn'] as const, { description: 'conversation: user/assistant text only. turn: tool/shell activity in user turn containing entryId; omit part/offset.' })),
