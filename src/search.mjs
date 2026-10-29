@@ -254,7 +254,7 @@ export class HistoryIndex {
       throw new Error('kind must be user, assistant, summary, custom, tool_call, tool_result, or shell');
     }
     if (!hasQuery && literal) throw new Error('literal mode requires a nonblank query');
-    if (!hasQuery && (tool !== null || options.reasoning || kind !== undefined)) throw new Error('tool, kind and reasoning:true require a nonblank query or anyOf; omit them to browse sessions.');
+    if (!hasQuery && (tool !== null || options.reasoning || kind !== undefined)) throw new Error('tool, kind and reasoning:true require a nonblank query or anyOf. To read a session, use session_read; to list sessions, omit them.');
     const dateColumn = hasQuery ? 'd.timestamp' : 's.updated';
     const dateSql = [], dateArgs = [];
     if (options.since) { dateSql.push(`${dateColumn}>=?`); dateArgs.push(bound(options.since)); }
